@@ -1,0 +1,27 @@
+# Build outputs
+*.apk
+gateway-magisk.zip
+magisk/system/priv-app/Gateway/
+!magisk/system/priv-app/PermissionController/
+local.properties
+.env.build
+
+# Gradle
+.gradle/
+build/
+app/build/
+
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# abox_pos kernel module build (the shipped copy is magisk/abox_pos.ko)
+tools/abox-pos/*.ko
+tools/abox-pos/*.o
+tools/abox-pos/*.mod.c
+tools/abox-pos/.*.cmd
+tools/abox-pos/.tmp_versions/
+tools/abox-pos/Module.symvers
+tools/abox-pos/modules.order
