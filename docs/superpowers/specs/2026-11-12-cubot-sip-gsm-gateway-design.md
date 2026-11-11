@@ -24,8 +24,8 @@
 | Основа | Форк `pulpoff/gsm2sip` (MIT) | Готовая, отлаженная реализация той же задачи: свой SIP-стек без нативного кода, TLS, digest-auth, RTP, Magisk-модуль, чип-профили |
 | `minSdk` | 31 (Android 12) | Выбрано пользователем. Отличается от исходной постановки «7–15»: Android 7–11 вне контура |
 | `targetSdk` / `compileSdk` | 35 / 35 | Целевые устройства — Android 15 |
-| Устройства | Cubot X90 (MediaTek Helio G99), Cubot X100 (Unisoc T606) | Роут (Magisk), кастомная прошивка, IMEI заменён. Прошивку не трогаем, Android не обновляем |
-| X100 (Unisoc) | Исследовать цифровой путь; при неудаче — акустический фолбэк | В upstream профиля Unisoc нет |
+| Устройства | Cubot X90 (MediaTek Helio G99, MT6789), Cubot X100 (MediaTek Dimensity 7025, MT6855V) | Роут (Magisk), кастомная прошивка, IMEI заменён. Прошивку не трогаем, Android не обновляем |
+| Оба устройства | MediaTek — одно чип-семейство | X100 — это Dimensity 7025 (MT6855V), а не Unisoc. Unisoc T7200/T606 — это Cubot A40 |
 | Объём v1 | Только голос в обе стороны + конфиг FreePBX | SMS-over-SIP и Linux-демон исключены из первой версии |
 | Сигнализация | Прямой SIP over TLS + постоянный foreground service | Без своего сервера и без push |
 
@@ -95,28 +95,69 @@
   (systemless overlay) и `su`-команды.
 - Кастомная прошивка с заменённым IMEI — не трогаем; обновление Android не требуется.
 
-### 5.2 Cubot X90 — MediaTek Helio G99
+### 5.2 Cubot X90 — MediaTek Helio G99 (MT6789) и X100 — Dimensity 7025 (MT6855V)
 
-Upstream уже содержит профиль MediaTek MT6735/MT6753, работающий через
-BGS-player модема: HAL-параметры `Set_BGS_UL_Mute` / `Set_BGS_DL_Mute` /
+Оба устройства — MediaTek, поэтому аудио-стратегия одна на оба.
+
+Upstream содержит профиль MediaTek MT6735/MT6753, работающий через BGS-player
+модема: HAL-параметры `Set_BGS_UL_Mute` / `Set_BGS_DL_Mute` /
 `Set_SpeechCall_UL_Mute` / `Set_SpeechCall_DL_Mute`, захват через
 `AudioSource.VOICE_DOWNLINK`, воспроизведение с `USAGE_VOICE_COMMUNICATION`.
+Но он проверен только на Android 8.1 (MT6735/MT6753) — это другое поколение HAL,
+чем MT6789/MT6855V на Android 15. Поэтому профиль для Cubot — гипотеза,
+проверяемая на устройстве, а не готовый факт.
 
-Требуется: подтвердить на Helio G99 (mt6768) наличие BGS-пути в HAL и
-`incall_music` в `/vendor/etc/audio_policy_configuration.xml`, затем завести
-профиль `mt6768()` на базе `mt6753()` с проверенными значениями.
+Кандидаты инъекции в аплинк, по убыванию приоритета:
 
-### 5.3 Cubot X100 — Unisoc T606
+1. **BGS-player через HAL-параметры** — как в профиле `mt6753()`. Требует, чтобы
+   HAL MT6855V/MT6789 отдавал поток в `AudioALSAPlaybackHandlerVoice → BGSPlayer`.
+2. **`incall_music` mixPort → `Telephony Tx`** — маршрут, выраженный в
+   `/vendor/etc/audio_policy_configuration.xml`
+   (`AUDIO_OUTPUT_FLAG_INCALL_MUSIC` + `AUDIO_DEVICE_OUT_TELEPHONY_TX`).
+   Референсный проект зафиксировал, что у POCO C65 (Helio G99) этот порт
+   в политике присутствует, но результат не был определён (устройство без root).
+   Проверяется на устройстве без root: `grep incall_music
+   /vendor/etc/audio_policy_configuration.xml`.
+3. **AOSP-перехват аудио разговора** (`CALL_AUDIO_INTERCEPTION`,
+   `CAPTURE_VOICE_COMMUNICATION_OUTPUT`) — стандартный механизм AOSP 12+.
+   Проба готовности:
+   `adb shell "dumpsys media.audio_policy | grep -E 'TELEPHONY_TX|TELEPHONY_RX'"`.
+4. **`tinycap` с PCM-канала telephony-rx** — чтение абонента напрямую из PCM
+   (`Incall Capture Stream0`), рабочий путь на Tensor. Фолбэк для захвата.
 
-Цифрового пути в upstream нет. План:
+Ограничения, подтверждённые в AOSP:
 
-1. Проверить `tools/check-device.sh` на устройстве: наличие mix-порта инъекции
-   в audio policy, HAL-контролов, поддержка `VOICE_DOWNLINK`.
-2. Если путь есть — завести профиль `unisoc()`.
-3. Если нет — акустический режим (общий микрофон/динамик, эхо, сниженное качество),
-   с явной пометкой в логе и в UI, какой профиль активен.
+- `CAPTURE_AUDIO_OUTPUT` имеет protection level `signature|privileged` и **не
+  является runtime-разрешением**: `pm grant` бросает `SecurityException`
+  независимо от root. Единственный поддерживаемый путь — установка APK как
+  системного priv-app с allowlist-файлом `privapp-permissions-*.xml`.
+  Magisk-модуль upstream это уже делает.
+- Захват сотовой ноги нужно делать через `VOICE_DOWNLINK`, а не `VOICE_CALL`:
+  `VOICE_CALL` смешивает аплинк, куда мы инъецируем голос оператора, и агент
+  слышит сам себя.
+- `ro.telephony.same_phone_use_voice_call` — авторитетных источников не найдено,
+  на этом свойстве не строим.
 
-Выбор между путями делается по факту проверки на устройстве, а не по предположению.
+Отдельно проверяется на устройстве: тип сотового вызова. При **VoWiFi (WFC)**
+сотовой ноги нет вообще — HAL-аудио разговора отсутствует, шлюз работать не
+будет; WFC нужно отключить на SIM. При IMS/VoLTE голос идёт пакетным вызовом,
+и HAL-путь может отличаться от классического CS. Замена IMEI может помешать
+провижингу IMS у оператора — это либо фолбэк на CS (нам полезно), либо потеря
+голоса (неприемлемо).
+
+### 5.3 Порядок проверки на устройстве
+
+До написания профиля на устройстве выполняется `tools/check-device-cubot.sh`
+(адаптация `tools/check-device.sh` под MediaTek), который проверяет:
+
+- `ro.board.platform`, `ro.soc.model`, `ro.product.board` — определение SoC;
+- наличие `incall_music` и `Telephony Tx` в audio policy (без root);
+- наличие `TELEPHONY_TX`/`TELEPHONY_RX` в `dumpsys media.audio_policy`;
+- HAL-параметры BGS через `su`;
+- тип сотового вызова (CS / IMS / WFC) по `logcat -b radio`.
+
+Результат однозначно определяет, какой из кандидатов §5.2 реализуем, а какой
+остаётся фолбэком. Без этого профиль пишется вслепую.
 
 ## 6. Сторона FreePBX
 
@@ -180,9 +221,11 @@ BGS-player модема: HAL-параметры `Set_BGS_UL_Mute` / `Set_BGS_DL_
 
 | Риск | Влияние | Митигация |
 |---|---|---|
-| На Helio G99 нет BGS-пути | X90 деградирует до акустики | Проверка `check-device.sh` до записи профиля; в UI видно активный профиль |
-| На Unisoc T606 нет цифрового пути | X100 деградирует до акустики | Явный фолбэк и предупреждение |
+| На MT6855V/MT6789 нет ни BGS, ни `incall_music` | Оба Cubot деградируют до акустики | `check-device-cubot.sh` до написания профиля; в UI видно активный профиль |
+| VoWiFi включён оператором | Сотовой ноги нет — мост невозможен | Отключить WFC на SIM; проверять тип вызова по `logcat -b radio` |
+| IMS/VoLTE-вызов идёт пакетным, HAL-путь иной | Захват/инъекция не работают | Проверка на реальном вызове до боевого включения |
+| Замена IMEI ломает провижининг IMS | Нет голоса вообще | При отказе — SIM с «чистым» IMEI; прошивку не трогаем |
 | Asterisk TLS-сертификат без нужного SAN | Не регистрируется | FQDN + SAN обязательны; заранее проверить на сервере |
 | `X-GSM-*` не доходят на newer Asterisk | Звонок не маршрутизируется | Pre-dial-обработчик на целевом канале (не наследование) |
-| IMEI-подмена на устройстве вызывает вопросы оператора | Звонки не проходят | Не трогаем прошивку; при отказе оператора — замена SIM с «чистым» IMEI |
+| `pm grant` не даёт `CAPTURE_AUDIO_OUTPUT` | Нет захвата сотовой ноги | Только priv-app + allowlist через Magisk-модуль (уже в upstream) |
 | Приложение убито системой в фоне | Нет входящих SIP | Foreground service + `WAKE_LOCK` + `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` + `BootReceiver` |
