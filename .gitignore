@@ -25,3 +25,8 @@ tools/abox-pos/.*.cmd
 tools/abox-pos/.tmp_versions/
 tools/abox-pos/Module.symvers
 tools/abox-pos/modules.order
+
+# local build artifacts
+local.properties
+.gradle/
+build/
