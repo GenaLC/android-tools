@@ -683,12 +683,74 @@
                             android:buttonTint="@color/accent"
                             android:textColor="@color/text_label"
                             android:layout_marginTop="8dp" />
-
                         <TextView
                             android:id="@+id/tvCfgSrtpHint"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:text="SDES-keyed SRTP (RFC 3711). Requires TLS: the keys travel inside the SIP signalling, so over plain UDP they would be readable by anyone on the path."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
+                        <!-- Certificate authority: for a PBX whose certificate
+                             is signed by a private CA rather than a public
+                             one.  The public CAs are always trusted as well;
+                             this only adds to them. -->
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Certificate authority (private PBX)"
+                            android:textStyle="bold"
+                            android:textColor="@color/text_label"
+                            android:layout_marginTop="16dp" />
+
+                        <TextView
+                            android:id="@+id/tvCfgCaStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="No certificate authority imported — only the system CAs are trusted."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:layout_marginTop="8dp">
+
+                            <Button
+                                android:id="@+id/btnCfgImportCa"
+                                android:layout_width="0dp"
+                                android:layout_weight="1"
+                                android:layout_height="44dp"
+                                android:text="IMPORT CA"
+                                android:textSize="12sp"
+                                android:textColor="@color/accent_on"
+                                android:backgroundTint="@color/accent"
+                                android:layout_marginEnd="8dp"
+                                android:minHeight="0dp"
+                                android:insetTop="0dp"
+                                android:insetBottom="0dp" />
+
+                            <Button
+                                android:id="@+id/btnCfgRemoveCa"
+                                android:layout_width="0dp"
+                                android:layout_weight="1"
+                                android:layout_height="44dp"
+                                android:text="REMOVE CA"
+                                android:textSize="12sp"
+                                android:textColor="@color/text_label"
+                                android:backgroundTint="#374151"
+                                android:minHeight="0dp"
+                                android:insetTop="0dp"
+                                android:insetBottom="0dp" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Import the CA certificate that signed your PBX's TLS certificate (a .pem file). The server's hostname is still checked against the certificate, so the certificate must carry the name you connect to in its SAN."
                             android:textSize="12sp"
                             android:textColor="@color/text_hint"
                             android:paddingTop="6dp" />

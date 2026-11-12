@@ -41,7 +41,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   Samsung HAL may route this into the modem uplink directly.
  *
  * The Magisk module disables Android's audio concurrency restrictions.
- * Uses G.722 codec for wideband (16 kHz), falls back to PCMA (G.711 A-law).
+ * Uses G.722 codec for wideband (16 kHz), falls back to the narrowband G.711
+ * codecs (A-law, µ-law) when the server does not want G.722.
  */
 class RtpSession(
     private val context: Context,
@@ -921,6 +922,7 @@ class RtpSession(
         // Pre-encode silence for the negotiated codec (reused every frame)
         val silencePayload = when (payloadType) {
             RtpPacket.PT_PCMA -> ByteArray(160) { 0xD5.toByte() }  // A-law silence
+            RtpPacket.PT_PCMU -> ByteArray(160) { 0xFF.toByte() }  // µ-law silence
             else -> ByteArray(160)  // G.722: zeros → near-silence
         }
 
@@ -1380,6 +1382,10 @@ class RtpSession(
                 if (captureRate == 8000) PcmaCodec.encode8k(pcmBuf)
                 else PcmaCodec.encode(pcmBuf)
             }
+            RtpPacket.PT_PCMU -> {
+                if (captureRate == 8000) PcmuCodec.encode8k(pcmBuf)
+                else PcmuCodec.encode(pcmBuf)
+            }
             else -> {
                 val pcm16k = if (captureRate == 8000) upsample8kTo16k(pcmBuf) else pcmBuf
                 g722Encoder.encode(pcm16k)
@@ -1452,7 +1458,12 @@ class RtpSession(
                     dtmfDetector?.onPacket(rtp.timestamp, rtp.payload)
                     continue
                 }
-                if (rtp.payloadType == payloadType || rtp.payloadType == RtpPacket.PT_PCMA || rtp.payloadType == RtpPacket.PT_G722) {
+                // Only the negotiated payload type is decoded.  The session
+                // runs one decoder, chosen by the payload type the SDP agreed
+                // on, so bytes of another codec would be noise — accepting
+                // them "just in case" turns a codec change into hiss instead
+                // of silence.
+                if (rtp.payloadType == payloadType) {
                     if (!jitterBuffer.offer(rtp.payload)) {
                         jitterBuffer.poll() // drop oldest
                         jitterBuffer.offer(rtp.payload)
@@ -1985,6 +1996,10 @@ class RtpSession(
                     RtpPacket.PT_PCMA -> {
                         if (playbackRate == 8000) PcmaCodec.decode8k(encoded)
                         else PcmaCodec.decode(encoded)
+                    }
+                    RtpPacket.PT_PCMU -> {
+                        if (playbackRate == 8000) PcmuCodec.decode8k(encoded)
+                        else PcmuCodec.decode(encoded)
                     }
                     else -> g722Decoder.decodeToBytes(encoded)
                 }

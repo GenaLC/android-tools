@@ -4,6 +4,10 @@ import android.media.AudioAttributes
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
+import com.callagent.gateway.mediatek.MediaTekCapabilityProbe
+import com.callagent.gateway.mediatek.MediaTekPlanner
+import com.callagent.gateway.mediatek.MediaTekPlatform
+import com.callagent.gateway.mediatek.MediaTekProfiles
 
 /**
  * Device-specific audio profile.  Each supported device has different
@@ -502,9 +506,33 @@ data class DeviceProfile(
                 listOf(platform, hw, board, socModel).any { it.contains("mt6735") || it.contains("mt6753") } ||
                 device == "metal" && Build.MANUFACTURER.equals("Ulefone", ignoreCase = true)
 
+            // MediaTek MT67xx/MT68xx — the Cubot X90 (Helio G99 / MT6789) and
+            // the Cubot X100 (Dimensity 7025 / MT6855V, codename "aza").
+            //
+            // The MT6753 profile below was verified on Android 8.1; these
+            // phones run Android 15 and a different HAL generation, where
+            // the modem's background-sound player may not exist and the
+            // audio policy may or may not offer an incall_music route.
+            // Nothing about that can be known from here, so the route is
+            // measured on the device instead of assumed — see
+            // [mtAdaptive].
+            //
+            // All the strings are looked at, because which one carries the
+            // SoC name depends on the ROM: LineageOS puts it in
+            // ro.board.platform, stock ROMs tend to put the product
+            // codename there ("aza"), and Build.SOC_MODEL gives it on
+            // Android 12 and later regardless.
+            val mediatekFamily =
+                MediaTekPlatform.isMediaTek(platform, socModel, board, hw, device, socMachine)
+
             return when {
                 // Ulefone Metal and other MT6735/MT6753 phones sharing its audio HAL.
                 mt6735Family -> mt6753()
+
+                // The newer MediaTek generations, measured on the device.
+                mediatekFamily -> mtAdaptive(
+                    MediaTekPlatform.label(socModel, platform, board, hw, device)
+                )
 
                 // Samsung Galaxy S4 Mini (MSM8930 / WCD9304)
                 board.contains("msm8930") || hw.contains("qcom") && model.contains("gt-i919") ->
@@ -970,6 +998,36 @@ data class DeviceProfile(
             routeChangeDelayMs = 500,
             appopsPropagationMs = 300,
         )
+
+        /**
+         * A MediaTek device whose capabilities were measured on the phone.
+         *
+         * The upstream MediaTek route — the modem's background-sound player
+         * — was verified on an MT6735/MT6753 running Android 8.1.  The
+         * Cubot X90 (MT6789) and X100 (MT6855V) run Android 15 and a
+         * different HAL generation, where that player may not exist, and
+         * where the audio policy may or may not offer an incall_music route
+         * to the modem uplink.  Which of the two is there can only be found
+         * out on the device, so it is found out: the probe measures what the
+         * HAL answers and what the audio policy declares, and the plan that
+         * follows picks the injection mode in the order BGS, incall_music,
+         * acoustic.
+         *
+         * The probe runs here, on the first detection, which is on the ring
+         * path: one root shell round trip, and the answer cannot change
+         * while the app runs.
+         *
+         * The chosen mode is in the profile's name and in the log line
+         * below, so a call that does not sound right can be traced back to
+         * the mechanism that was chosen for it.
+         */
+        fun mtAdaptive(label: String): DeviceProfile {
+            val probe = MediaTekCapabilityProbe.probe()
+            val plan = MediaTekPlanner.plan(probe)
+            Log.i(TAG, "Selected injection mode: ${plan.injection} (capture: ${plan.capture})")
+            for (note in plan.notes) Log.i(TAG, "MediaTek probe: $note")
+            return MediaTekProfiles.build(plan, label)
+        }
 
         fun sm6150() = DeviceProfile(
             name = "SM6150/SM7150 (WCD9375)",

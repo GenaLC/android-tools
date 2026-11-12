@@ -40,18 +40,30 @@ on a headless phone, and ships the root tools and the S10e's kernel module.
 
 ## Audio Codec
 
-Selectable in Settings, defaulting to **G.722 only** (wideband, 16 kHz):
+Selectable in Settings. This fork defaults to **G.722 + G.711** so that the
+gateway interoperates with a stock PBX endpoint that allows only `alaw`/`ulaw`:
 
 | Setting | Offered in SDP |
 |---|---|
-| G.722 only *(default)* | `9` |
-| G.722 preferred, G.711 allowed | `9 8 0` |
-| G.711 only | `8 0` |
+| G.722 + G.711 *(default)* | `9 8 0 101` |
+| G.722 only | `9 101` |
+| G.711 only | `8 0 101` |
 
-The default is G.722 alone because offering G.711 alongside it means servers
-routinely pick G.711 and every call ends up narrowband regardless of what both
-ends support.  Whatever is configured, the app still answers with a codec the
-remote actually offered rather than failing a call over a preference.
+Payload `101` is `telephone-event` (DTMF), offered in every mode.
+
+Two reasons the default is no longer G.722 alone.  A PBX endpoint restricted to
+`alaw`/`ulaw` answers a G.722-only offer with `488 Not Acceptable`, and the call
+never starts — the common case on FreePBX, whose trunks are usually `!all,alaw`.
+And a PCMU offer that the gateway cannot actually encode is worse than no
+offer at all: the far end hears noise.  Both PCMA and PCMU are implemented here
+(`rtp/PcmuCodec.kt`), so the offer is honest.
+
+The tradeoff is real: a server that may choose between G.722 and G.711 will
+often pick G.711, and every call ends up narrowband.  The cellular leg is 8 kHz
+anyway, so for a GSM gateway that costs little.  Whatever is configured, the
+app still answers with a codec the remote actually offered rather than failing
+a call over a preference, and the 200 OK now names exactly the payload that was
+negotiated.
 
 ## Supported Devices
 
@@ -425,8 +437,15 @@ there is nothing to write on the server side:
 
 The gateway is server-agnostic — it registers like any SIP client — so you can
 point it at a server you run instead. What follows is one worked example,
-using Asterisk (chan_sip) to route inbound GSM calls to an AI agent. Adapt it
-to whatever your server does.
+using Asterisk to route inbound GSM calls to an AI agent. Adapt it to whatever
+your server does.
+
+> **Note on `chan_sip`:** the original upstream README was written for
+> `chan_sip`, which Asterisk **removed in release 21**. The example below now
+> uses `chan_pjsip`, which is what modern FreePBX uses. A complete, commented
+> configuration for FreePBX — endpoint, `identify`, both call directions,
+> TLS requirements and verification commands — is in
+> [`docs/freepbx/README.md`](docs/freepbx/README.md).
 
 It addresses calls the way a VoIP router does: the Request-URI carries the
 SIM's number and `From` carries the calling party. That shapes the config
@@ -437,27 +456,27 @@ from rather than by who the INVITE says it is.
 
 ### 1. Create a SIP account for the gateway
 
-Add to `sip.conf` or create via the realtime database:
+`pjsip.conf` (or the FreePBX UI, Administration → Extensions → Add Extension →
+Device):
 
 ```ini
 [gateway-gw1](agent-template)
-type = friend
-host = dynamic
-secret = <strong-password>
+type = endpoint
 context = gateway-incoming
-; From carries the GSM caller, not "gateway-gw1".  If chan_sip then logs "no
-; matching peer" for the caller's number, this makes it match on the address
-; the gateway registered from instead.
-insecure = port,invite
-; The gateway offers G.722 only unless Settings → Codec says otherwise.
+; From carries the GSM caller, not "gateway-gw1", so the peer has to be
+; recognised by the address it registered from.  See docs/freepbx/README.md
+; for the `identify` section that does this on pjsip.
+; The gateway offers G.722 + G.711 unless Settings → Codec says otherwise.
 disallow = all
 allow = g722
+allow = alaw
+allow = ulaw
 ; Keep media on the server.  A re-INVITE or UPDATE (a session-timer refresh)
 ; is answered with the SDP the call started with, so the gateway does not
 ; follow the media to a new address.
-directmedia = no
+direct_media = no
 ; RFC 4733 telephone-events; "info" works too — see DTMF below.
-dtmfmode = rfc2833
+dtmf_mode = rfc4733
 ```
 
 ### 2. Add gateway dialplan context

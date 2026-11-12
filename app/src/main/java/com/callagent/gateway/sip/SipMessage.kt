@@ -1,5 +1,6 @@
 package com.callagent.gateway.sip
 
+import com.callagent.gateway.rtp.RtpPacket
 import com.callagent.gateway.rtp.SrtpKeys
 
 /**
@@ -153,6 +154,40 @@ class SipMessage private constructor(
                 ?: events.firstOrNull())?.first
         }
 
+    /**
+     * The payload types the peer's m=audio line lists.
+     *
+     * Everything from the fourth token on is a payload type: the first three
+     * are the media description, the port and the transport.
+     */
+    val sdpOfferedPayloadTypes: Set<Int>
+        get() {
+            val mLine = body.lineSequence().firstOrNull { it.startsWith("m=audio") }
+                ?: return emptySet()
+            val parts = mLine.split(" ")
+            val offered = mutableSetOf<Int>()
+            for (i in 3 until parts.size) {
+                parts[i].trim().toIntOrNull()?.let { offered.add(it) }
+            }
+            return offered
+        }
+
+    /**
+     * The payload type this gateway will actually use for the session.
+     *
+     * Null when the peer offered no media at all, or offered only codecs
+     * this build does not have — in that case the answer must not claim a
+     * payload the peer never offered, so the caller keeps the configured
+     * payload list instead.
+     */
+    val sdpNegotiatedPayloadType: Int?
+        get() {
+            val offered = sdpOfferedPayloadTypes
+            if (offered.isEmpty()) return null
+            val preferred = sdpPreferredPayloadType
+            return if (preferred in offered) preferred else null
+        }
+
     /** Get the preferred payload type from the remote SDP.
      *  Collects all payload types offered in the remote m=audio line,
      *  then picks OUR preferred codec: G.722 > PCMA > PCMU. */
@@ -290,13 +325,19 @@ object SipBuilder {
     @Volatile
     var userAgent: String = "gsm2sip"
 
-    /** Which codecs to offer and accept: "g722", "g711" or "both".
+    /**
+     * Which codecs to offer and accept: "g722", "g711" or "both".
      *
-     *  G.722 alone is the default and the reason audio is wideband: when G.711
-     *  is offered alongside it, servers routinely pick PCMA and every call ends
-     *  up narrowband regardless of what both ends support. */
+     *  "both" is the default because a gateway that offers G.722 alone is
+     *  refused with 488 by every endpoint that only allows G.711 — which is
+     *  most of them, since alaw/ulaw is what a PSTN trunk guarantees.  The
+     *  price is that many servers pick the G.711 codec when G.722 is offered
+     *  alongside it, and the call ends up narrowband even though both ends
+     *  can do better.  That is the right trade for a cellular leg: it is 8 kHz
+     *  anyway.
+     */
     @Volatile
-    var codecMode: String = "g722"
+    var codecMode: String = "both"
 
     /**
      * Transport token for Via, and the matching Contact parameter.
@@ -438,11 +479,24 @@ object SipBuilder {
         localRtpPort: Int? = null,
         toTag: String = tag(),
         srtp: SrtpKeys? = null,
-        srtpTag: Int = 1
+        srtpTag: Int = 1,
+        negotiatedPayloadType: Int? = null
     ): String {
         val to = msg.to ?: ""
         val toWithTag = if (to.contains(";tag=")) to else "$to;tag=$toTag"
-        val sdp = if (localRtpPort != null) buildSdp(localIp, localRtpPort, srtp, srtpTag) else null
+        // The answer must claim the payload the call is actually going to use.
+        // Advertising the whole configured list leaves the choice to the
+        // server, which may pick a different codec than the one the RTP
+        // session was set up for — and then both ends hear noise.
+        //
+        // Derived from the request for an initial INVITE (no To tag yet: the
+        // tag is ours and does not exist before we answer).  A re-INVITE is
+        // answered with the codec list the call started with, because the
+        // media session is not renegotiated.
+        val negotiated = negotiatedPayloadType ?: if (msg.method == "INVITE" && msg.toTag == null) {
+            msg.sdpNegotiatedPayloadType
+        } else null
+        val sdp = if (localRtpPort != null) buildSdp(localIp, localRtpPort, srtp, srtpTag, negotiated) else null
         return buildString {
             append("SIP/2.0 200 OK\r\n")
             append("Via: ${msg.via}\r\n")
@@ -580,11 +634,7 @@ object SipBuilder {
         // call is set up -- putting one here would publish a key outside any
         // dialog that used it.  This is also what a FRITZ!Box reports, which
         // likewise answers OPTIONS with plain AVP while doing SDES on calls.
-        val payloads = when (codecMode) {
-            "g711" -> "8 0 101"
-            "both" -> "9 8 0 101"
-            else -> "9 101"
-        }
+        val payloads = offerPayloads()
         val sdp = buildString {
             append("v=0\r\n")
             append("o=gateway 0 0 IN IP4 $localIp\r\n")
@@ -624,6 +674,28 @@ object SipBuilder {
     }
 
     /**
+     * The payload list an offer carries: every codec this mode allows.
+     *
+     * telephone-event is always in it — it carries DTMF, not voice.
+     */
+    private fun offerPayloads(): String = when (codecMode) {
+        "g711" -> "8 0 101"
+        "both" -> "9 8 0 101"
+        else -> "9 101"
+    }
+
+    /**
+     * The rtpmap line for one payload type, or null for a payload this build
+     * has no codec for.
+     */
+    private fun codecRtpmap(payloadType: Int): String? = when (payloadType) {
+        RtpPacket.PT_G722 -> "${RtpPacket.PT_G722} G722/8000"
+        RtpPacket.PT_PCMA -> "${RtpPacket.PT_PCMA} PCMA/8000"
+        RtpPacket.PT_PCMU -> "${RtpPacket.PT_PCMU} PCMU/8000"
+        else -> null
+    }
+
+    /**
      * @param srtp keying material for this call, or null for plain RTP.  It is
      *   a parameter rather than shared state because every call needs its own
      *   key: one master key reused across calls would let anyone who recorded
@@ -631,21 +703,22 @@ object SipBuilder {
      * @param srtpTag the crypto tag to answer with.  Answering an offer must
      *   echo the tag that was accepted (RFC 4568 §5.1.2); 1 is right for an
      *   offer we originate.
+     * @param negotiatedPayloadType the payload the session actually uses, for
+     *   an answer.  Null for an offer, where the whole configured list is
+     *   offered and the peer picks.
      */
     private fun buildSdp(
         localIp: String,
         rtpPort: Int,
         srtp: SrtpKeys? = null,
-        srtpTag: Int = 1
+        srtpTag: Int = 1,
+        negotiatedPayloadType: Int? = null
     ): String = buildString {
         // G.722 is wideband (16 kHz sampling) but its SDP clock rate is
         // written as 8000 per RFC 3551 — a historical quirk, not a typo.
         // telephone-event is always offered: it carries DTMF, not voice.
-        val payloads = when (codecMode) {
-            "g711" -> "8 0 101"
-            "both" -> "9 8 0 101"
-            else -> "9 101"
-        }
+        val payloads = negotiatedPayloadType?.let { "$it ${RtpPacket.PT_TELEPHONE_EVENT}" }
+            ?: offerPayloads()
         append("v=0\r\n")
         append("o=gateway 0 0 IN IP4 $localIp\r\n")
         append("s=SIP Call\r\n")
@@ -658,10 +731,15 @@ object SipBuilder {
         if (srtp != null) {
             append("a=crypto:$srtpTag ${srtp.suite.sdpName} inline:${srtp.toInline()}\r\n")
         }
-        if (codecMode != "g711") append("a=rtpmap:9 G722/8000\r\n")
-        if (codecMode != "g722") {
-            append("a=rtpmap:8 PCMA/8000\r\n")
-            append("a=rtpmap:0 PCMU/8000\r\n")
+        if (negotiatedPayloadType != null) {
+            // An answer names one codec: the one that was negotiated.
+            codecRtpmap(negotiatedPayloadType)?.let { append("a=rtpmap:$it\r\n") }
+        } else {
+            if (codecMode != "g711") append("a=rtpmap:9 G722/8000\r\n")
+            if (codecMode != "g722") {
+                append("a=rtpmap:8 PCMA/8000\r\n")
+                append("a=rtpmap:0 PCMU/8000\r\n")
+            }
         }
         append("a=rtpmap:101 telephone-event/8000\r\n")
         append("a=fmtp:101 0-16\r\n")

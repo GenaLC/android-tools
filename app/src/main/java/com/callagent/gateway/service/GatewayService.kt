@@ -735,7 +735,7 @@ class GatewayService : Service() {
 
         val intent = Intent(this, GatewayService::class.java).apply { action = ACTION_SMS_SEND }
         try {
-            startForegroundService(intent)
+            startServiceCompat(this, intent)
         } catch (e: Exception) {
             Log.w(TAG, "Could not schedule SMS dispatch: ${e.message}")
         }
@@ -1114,8 +1114,15 @@ class GatewayService : Service() {
 
         // Codec preference is a property of the SDP we build, so it has to be
         // in place before the first INVITE goes out.
+        //
+        // "both" is the default: a gateway that offers G.722 alone is
+        // answered with 488 Not Acceptable by every endpoint that allows
+        // only G.711, which is most of them — alaw/ulaw is what a PSTN
+        // trunk guarantees.  The price is that a server which prefers G.711
+        // picks it and the call is narrowband; the cellular leg is 8 kHz
+        // anyway, so that costs nothing here.
         com.callagent.gateway.sip.SipBuilder.codecMode =
-            prefs.getString("codec", "g722") ?: "g722"
+            prefs.getString("codec", "both") ?: "both"
 
         // The agent's level into the GSM uplink, as a step away from what the
         // device profile asks for.  Read here so a change applies on save
@@ -1411,6 +1418,12 @@ class GatewayService : Service() {
      * devices that ran an earlier build.
      */
     private fun createNotificationChannel() {
+        // Channels arrived with Android 8.  Below that there is nothing to
+        // create: the notification carries its own priority, and the builder
+        // in buildNotification() takes the legacy path.
+        if (Compat.notificationStyle(Build.VERSION.SDK_INT) == Compat.NotificationStyle.LEGACY) {
+            return
+        }
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(
@@ -1523,7 +1536,16 @@ class GatewayService : Service() {
         // reached from the app itself.  ACTION_MONITOR still exists and is
         // still handled, so anything already bound to it keeps working.
 
-        return Notification.Builder(this, activeChannelId())
+        val builder = if (Compat.notificationStyle(Build.VERSION.SDK_INT) == Compat.NotificationStyle.CHANNEL) {
+            Notification.Builder(this, activeChannelId())
+        } else {
+            // Android 7 and older have no channels: the importance is a
+            // property of the notification itself, and PRIORITY_MIN is the
+            // legacy equivalent of a minimum-importance channel.
+            @Suppress("DEPRECATION")
+            Notification.Builder(this).setPriority(Notification.PRIORITY_MIN)
+        }
+        return builder
             .setContentTitle(statusText)
             .setSmallIcon(icon)
             .setColor(accent)
@@ -1828,7 +1850,7 @@ class GatewayService : Service() {
                 putExtra(EXTRA_SMS_ID, id)
             }
             try {
-                context.startForegroundService(intent)
+                startServiceCompat(context, intent)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not wake gateway for SMS report: ${e.message}")
             }
@@ -1839,7 +1861,7 @@ class GatewayService : Service() {
                 action = ACTION_SMS_FLUSH
             }
             try {
-                context.startForegroundService(intent)
+                startServiceCompat(context, intent)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not wake gateway for SMS: ${e.message}")
             }
@@ -1853,7 +1875,7 @@ class GatewayService : Service() {
                 putExtra(EXTRA_USER, user)
                 putExtra(EXTRA_PASS, pass)
             }
-            context.startForegroundService(intent)
+            startServiceCompat(context, intent)
         }
 
         fun stop(context: Context) {
@@ -1861,6 +1883,22 @@ class GatewayService : Service() {
                 action = ACTION_STOP
             }
             context.startService(intent)
+        }
+
+        /**
+         * Start the gateway service the way this platform expects.
+         *
+         * startForegroundService() is Android 8 and up.  Below that it does
+         * not exist, and calling it is a NoSuchMethodError — an Error, which
+         * the `catch (e: Exception)` around the call sites does not catch.
+         * A plain startService() is the equivalent there: the service
+         * promotes itself to the foreground as soon as it is up.
+         */
+        private fun startServiceCompat(context: Context, intent: Intent) {
+            when (Compat.startMethod(Build.VERSION.SDK_INT)) {
+                Compat.StartMethod.FOREGROUND_SERVICE -> context.startForegroundService(intent)
+                Compat.StartMethod.SERVICE -> context.startService(intent)
+            }
         }
     }
 }

@@ -5,12 +5,16 @@ plugins {
 
 android {
     namespace = "com.callagent.gateway"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.callagent.gateway"
-        minSdk = 26
-        targetSdk = 34
+        // Android 7 is the floor: the app degrades on old versions (no
+        // privileged telephony APIs, no channel-based notifications) but the
+        // SIP, RTP and GSM legs are version-independent. See the guards in
+        // service/Compat.kt and service/GatewayService.kt.
+        minSdk = 24
+        targetSdk = 35
         versionCode = 457
         versionName = "1.4.18"
     }

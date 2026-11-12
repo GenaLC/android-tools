@@ -8,6 +8,10 @@ import android.util.Log
 class GatewayApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // The SIP transport needs the app's private directory to find the
+        // certificate authorities the user imported, and it is created in
+        // places that have no context of their own.
+        AppContext.install(this)
         // Allow network on main thread — this is a headless gateway service,
         // not a UI app.  GSM callbacks arrive on the main thread and need to
         // trigger short UDP sends (SIP INVITE / BYE).

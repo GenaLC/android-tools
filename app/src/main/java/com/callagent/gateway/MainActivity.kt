@@ -54,10 +54,14 @@ import android.widget.PopupMenu
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.callagent.gateway.service.CallLogEntry
 import com.callagent.gateway.service.CallLogStore
+import com.callagent.gateway.sip.SipCaStore
+import com.callagent.gateway.sip.SipTrust
+import com.callagent.gateway.sip.SipTrustProvider
 import com.callagent.gateway.sms.SmsOutbox
 import com.callagent.gateway.service.GatewayService
 import java.text.SimpleDateFormat
@@ -65,6 +69,13 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+
+    // Picking the certificate authority to trust.  The Storage Access
+    // Framework hands back a URI with a read grant, so no storage permission
+    // is involved — the file never has to be copied somewhere readable.
+    private val caPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) importCa(uri) }
 
     // Settings-tab views
     private lateinit var tvLog: TextView
@@ -331,6 +342,8 @@ class MainActivity : AppCompatActivity() {
         tabConfig = findViewById(R.id.tabConfig)
         findViewById<View>(R.id.btnConfigBack).setOnClickListener { switchTab("home") }
         findViewById<View>(R.id.btnCfgSave).setOnClickListener { saveConfigFromView() }
+        findViewById<View>(R.id.btnCfgImportCa).setOnClickListener { pickCa() }
+        findViewById<View>(R.id.btnCfgRemoveCa).setOnClickListener { confirmRemoveCa() }
         findViewById<View>(R.id.btnCfgClearRecents).setOnClickListener { confirmClearRecents() }
         tvHomeStatusPill = findViewById(R.id.tvHomeStatusPill)
         tvHomeTlsBadge = findViewById(R.id.tvHomeTlsBadge)
@@ -554,8 +567,101 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── Certificate authority ──────────────────────────────────────────────
+    //
+    // The PBX in front of this gateway is a self-hosted box, and a self-hosted
+    // box rarely has a certificate from a public CA.  The gateway trusts the
+    // public CAs as always; importing a CA adds one more anchor so the
+    // server's own certificate is accepted.  The server's hostname is still
+    // checked against that certificate — importing a CA says nothing about
+    // which name the server may use.
+
+    private fun pickCa() {
+        caPicker.launch(
+            arrayOf(
+                "application/x-pem-file",
+                "application/x-x509-ca-cert",
+                "application/pem-certificate-chain",
+                "application/octet-stream",
+                "text/plain",
+            )
+        )
+    }
+
+    private fun importCa(uri: Uri) {
+        val bytes = try {
+            contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        }
+        if (bytes == null) {
+            Toast.makeText(this, "Could not read the selected file", Toast.LENGTH_LONG).show()
+            return
+        }
+        val certificates = try {
+            SipTrust.parseCertificates(bytes)
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "Not a certificate: ${e.message ?: "no PEM certificate found"}",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        try {
+            SipCaStore.appendPem(this, bytes)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not store the certificate: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+        // The cached trust is stale now; the next connect re-reads the file.
+        SipTrustProvider.invalidate()
+        updateCaStatus()
+        Toast.makeText(
+            this,
+            "Imported ${certificates.size} certificate(s). Reconnect to use them.",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
+    private fun confirmRemoveCa() {
+        if (!SipCaStore.hasImportedCa(this)) {
+            Toast.makeText(this, "No certificate authority is imported", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Remove the imported certificate authority?")
+            .setMessage(
+                "The gateway will go back to trusting only the system CAs. " +
+                    "A PBX whose certificate is signed by a private CA will stop connecting."
+            )
+            .setNegativeButton("Keep", null)
+            .setPositiveButton("Remove") { _, _ ->
+                SipCaStore.clear(this)
+                SipTrustProvider.invalidate()
+                updateCaStatus()
+                Toast.makeText(this, "Removed", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    private fun updateCaStatus() {
+        val status = findViewById<TextView>(R.id.tvCfgCaStatus) ?: return
+        val count = try {
+            SipTrustProvider.current(this).importedCount
+        } catch (e: Exception) {
+            0
+        }
+        status.text = if (count > 0) {
+            "$count imported certificate(s) — trusted in addition to the system CAs."
+        } else {
+            "No certificate authority imported — only the system CAs are trusted."
+        }
+    }
+
     private fun openConfigView() {
         val prefs = getSharedPreferences("gateway", MODE_PRIVATE)
+        updateCaStatus()
         findViewById<EditText>(R.id.etCfgServer).setText(prefs.getString("server", "callagent.pro"))
         findViewById<EditText>(R.id.etCfgPort).setText(prefs.getInt("port", 5060).toString())
         findViewById<EditText>(R.id.etCfgUser).setText(prefs.getString("user", ""))
@@ -1413,7 +1519,17 @@ class MainActivity : AppCompatActivity() {
         // NOT_EXPORTED: the service sends these with setPackage(), so nothing
         // outside the app has any business delivering them — exported, any
         // installed app could feed the UI fabricated status and log lines.
-        registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        //
+        // The flagged overload only exists from API 26, and the
+        // RECEIVER_NOT_EXPORTED flag itself is only understood from API 33.
+        // Between the two, the flag value would be rejected as unknown, so
+        // the plain two-argument call is the only correct one below 33.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(statusReceiver, filter)
+        }
 
         // Replay any log messages buffered while activity was paused
         // Re-render from the service's buffer rather than consuming it: the

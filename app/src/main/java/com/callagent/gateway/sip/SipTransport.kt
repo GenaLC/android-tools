@@ -5,6 +5,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.system.StructTimeval
 import android.util.Log
+import com.callagent.gateway.AppContext
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -175,9 +176,11 @@ class TlsSipTransport(
 
     override fun open() {
         close()
-        val s = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-            .createSocket() as SSLSocket
-        s.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        // The platform trust store plus whatever the user imported in
+        // Settings.  The hostname check below is unaffected: it happens in
+        // the handshake, and no amount of trust weakens it.
+        val factory = socketFactory()
+        val s = openSocket(factory, host, port)
         s.soTimeout = soTimeoutMs
         s.tcpNoDelay = true
         // A bare SSLSocket validates the chain but NOT the hostname -- that
@@ -208,12 +211,59 @@ class TlsSipTransport(
                 "TLS handshake timed out to $host:$port — is $port the TLS port? " +
                     "(plaintext SIP is usually 5060, TLS 5061)", e
             )
+        } catch (e: javax.net.ssl.SSLException) {
+            // The trust manager's own message says whether the chain was
+            // unknown; pass it on rather than letting the raw handshake error
+            // stand, because the fix is an action in Settings, not a retry.
+            throw java.io.IOException(
+                "TLS handshake with $host:$port failed: ${e.message}", e
+            )
         }
         socket = s
         input = s.inputStream
         output = s.outputStream
         pending.setLength(0)
         log("TLS connected to $host:$port (${s.session.protocol}, ${s.session.cipherSuite})")
+    }
+
+    /**
+     * The socket factory to connect with: the platform trust store plus the
+     * certificate authorities the user imported.  Falls back to the platform
+     * default when there is no application context — the transport can be
+     * exercised in isolation, and the platform default is the right answer
+     * for a test.
+     */
+    private fun socketFactory(): SSLSocketFactory {
+        val context = AppContext.getOrNull() ?: return SSLSocketFactory.getDefault() as SSLSocketFactory
+        return try {
+            SipTrustProvider.current(context).socketFactory()
+        } catch (e: Exception) {
+            // A corrupted import file must not take the transport down: fall
+            // back to the platform store and let the handshake say what is
+            // wrong, which is more useful than a parse error here.
+            log("imported certificate authorities could not be read (${e.message}) — " +
+                "falling back to the system trust store")
+            SSLSocketFactory.getDefault() as SSLSocketFactory
+        }
+    }
+
+    /**
+     * An unconnected socket, then connected by us so the connect timeout
+     * applies.  Not every TLS provider implements the unconnected factory
+     * method; the fallback connects through the factory instead.
+     */
+    private fun openSocket(factory: SSLSocketFactory, host: String, port: Int): SSLSocket {
+        val unconnected = try {
+            factory.createSocket() as SSLSocket
+        } catch (e: java.net.SocketException) {
+            null
+        }
+        return if (unconnected != null) {
+            unconnected.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            unconnected
+        } else {
+            factory.createSocket(java.net.Socket(), host, port, true) as SSLSocket
+        }
     }
 
     override fun send(data: String, host: String, port: Int) {
