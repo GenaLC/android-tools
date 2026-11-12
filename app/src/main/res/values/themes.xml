@@ -38,6 +38,12 @@
         <item name="android:layout_marginTop">14dp</item>
     </style>
 
+    <!--
+        The CfgField style is defined in values-v26 as well, because
+        android:importantForAutofill arrived in Android 8 (API 26).  A style
+        of the same name in a qualified folder replaces the base one rather
+        than merging with it, so both copies have to carry every item.
+    -->
     <style name="CfgField">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
@@ -46,6 +52,5 @@
         <item name="android:background">@drawable/input_bg</item>
         <item name="android:padding">12dp</item>
         <item name="android:layout_marginTop">4dp</item>
-        <item name="android:importantForAutofill">no</item>
     </style>
 </resources>

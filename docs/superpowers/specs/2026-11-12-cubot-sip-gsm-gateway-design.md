@@ -22,7 +22,7 @@
 | Решение | Значение | Обоснование |
 |---|---|---|
 | Основа | Форк `pulpoff/gsm2sip` (MIT) | Готовая, отлаженная реализация той же задачи: свой SIP-стек без нативного кода, TLS, digest-auth, RTP, Magisk-модуль, чип-профили |
-| `minSdk` | 24 (Android 7) — до 15 | Исходное требование «7–15». Первый проход ставил 31, но аудит показал: в upstream нет требования API 31 (там minSdk 26), а снижение до 24 — это 3 guard'а в `GatewayService.kt` |
+| `minSdk` | 24 (Android 7) — до 15 | Исходное требование «7–15». Первый проход ставил 31, но аудит показал: в upstream нет требования API 31 (там minSdk 26). Снижение до 24 потребовало guard'ов на всех вызовах API 25–28, которые upstream не делал: их полный список снят линтером (`NewApi`), и на API 24/25 эти вызовы — `NoSuchMethodError`, то есть падение, а не исключение |
 | `targetSdk` / `compileSdk` | 35 / 35 | Целевые устройства — Android 15 |
 | Устройства | Cubot X90 (MediaTek Helio G99, MT6789), Cubot X100 (MediaTek Dimensity 7025, MT6855V) | Роут (Magisk), кастомная прошивка, IMEI заменён. Прошивку не трогаем, Android не обновляем |
 | Оба устройства | MediaTek — одно чип-семейство | X100 — это Dimensity 7025 (MT6855V), а не Unisoc. Unisoc T7200/T606 — это Cubot A40 |
@@ -225,7 +225,9 @@ RFC и не сработает на серверах, требующих qop. В
 
 - Локальная сборка: JDK 17 (`/opt/homebrew/opt/openjdk@17`), Android SDK
   (`platforms;android-35`, `build-tools;35.0.0`, `platform-tools`),
-  Gradle 8.5 через wrapper, AGP 8.2.2.
+  Gradle 8.9 через wrapper, AGP 8.7.3. (В исходном плане стояли Gradle 8.5 и
+  AGP 8.2.2, но AGP 8.2.2 не умеет `compileSdk 35` — без обновления сборка
+  на Android 15 не проходит.)
 - Выход v1: `app-debug.apk`/`app-release.apk` и `gsm2sip-magisk.zip`
   (модуль Magisk с APK, privapp-permissions, `tinymix`/`tinycap` под обе ABI,
   `sepolicy.rule`).
@@ -251,7 +253,7 @@ RFC и не сработает на серверах, требующих qop. В
 
 - SMS over SIP (в upstream есть, отключаем).
 - Linux-демон `gsm2sipd`.
-- Поддержка Android 7–11 (minSdk 31).
+- Поддержка Android ниже 7 (minSdk 24 — это Android 7, и ниже не идёт).
 - Push-пробуждение (используется foreground service).
 
 ## 10. Риски

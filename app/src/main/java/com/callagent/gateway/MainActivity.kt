@@ -510,7 +510,7 @@ class MainActivity : AppCompatActivity() {
             // The IMEI belongs to the radio, so it names the slot; the ICCID
             // names the card in it.  Either tells two otherwise identical
             // rows apart, so show whichever the platform will hand over.
-            val ident = runCatching { tm?.getImei(slot) }.getOrNull()
+            val ident = imeiOf(tm, slot)
                 ?.takeIf { it.isNotBlank() }?.let { "IMEI $it" }
                 ?: info.iccId?.takeIf { it.isNotBlank() }
                     ?.let { "ICCID \u2026${it.takeLast(6)}" }
@@ -714,8 +714,13 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Port switched back to 5060", Toast.LENGTH_SHORT).show()
             }
         }
+        // "both" is the default everywhere else — the builder, the service and
+        // the persisted preference all read it.  A different default here
+        // would show "G.722 only" in the dialog on a fresh install, and the
+        // first Save would write that back, leaving the gateway offering
+        // "9 101" only, which a stock FreePBX extension answers with 488.
         findViewById<RadioButton>(
-            when (prefs.getString("codec", "g722")) {
+            when (prefs.getString("codec", "both")) {
                 "g711" -> R.id.rbCodecG711
                 "both" -> R.id.rbCodecBoth
                 else -> R.id.rbCodecG722
@@ -969,6 +974,34 @@ class MainActivity : AppCompatActivity() {
         return if (asu in 0..31) -113 + 2 * asu else null
     }
 
+    /**
+     * The current signal strength, or null when the platform does not offer
+     * one.
+     *
+     * TelephonyManager.getSignalStrength() arrived in Android 9 (API 28).
+     * Below that the call is a NoSuchMethodError -- an Error, which the
+     * `catch (e: Exception)` around the call sites does not catch, so the
+     * diagnostics screen would take the whole app down on Android 7 and 8.
+     */
+    @SuppressLint("MissingPermission")
+    private fun signalStrengthOf(tm: android.telephony.TelephonyManager?): android.telephony.SignalStrength? {
+        if (tm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        return try { tm.signalStrength } catch (e: Exception) { null }
+    }
+
+    /**
+     * The IMEI of the radio in [slot], or null when the platform does not
+     * hand one over.
+     *
+     * TelephonyManager.getImei() arrived in Android 8 (API 26); below that
+     * the call is a NoSuchMethodError, so the ICCID is used instead.
+     */
+    @SuppressLint("MissingPermission")
+    private fun imeiOf(tm: android.telephony.TelephonyManager?, slot: Int): String? {
+        if (tm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
+        return try { tm.getImei(slot) } catch (e: Exception) { null }
+    }
+
     @SuppressLint("MissingPermission")
     private fun refreshNetworkInfo() {
         if (!::tvNetMobile.isInitialized) return
@@ -990,7 +1023,7 @@ class MainActivity : AppCompatActivity() {
                 android.telephony.TelephonyManager.NETWORK_TYPE_UNKNOWN -> "—"
                 else -> "?"
             }
-            val dbm = signalDbm(tm.signalStrength)
+            val dbm = signalDbm(signalStrengthOf(tm))
             if (dbm != null && dbm != Int.MAX_VALUE) "$type $name ${dbm}dBm"
             else "$type $name"
         } catch (e: Exception) {
@@ -1209,7 +1242,7 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
             } else {
-                signalDbm(tm.signalStrength)?.let { appendLine("Signal       : $it dBm") }
+                signalDbm(signalStrengthOf(tm))?.let { appendLine("Signal       : $it dBm") }
             }
         } catch (e: Exception) {
             appendLine("telephony: ${e.message}")
@@ -1292,6 +1325,11 @@ class MainActivity : AppCompatActivity() {
         fun sig(s: android.telephony.CellSignalStrength) = "${s.dbm} dBm (${s.level}/4)"
 
         val role = if (info.isRegistered) "serving cell" else "neighbour"
+        // CellIdentity.getMccString() and getMncString() arrived in Android 9
+        // (API 28), as did getOperatorAlphaLong().  Below that the calls are
+        // NoSuchMethodError -- Errors, which the catch around the caller does
+        // not catch -- so the row is left out entirely rather than guessed.
+        val mncAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
         // Subject-less `when` so the CellInfoNr branch can carry an SDK guard.
         // The class is API 29, and an `is` test against a class the platform
         // does not have is itself the hazard — it resolves the type before any
@@ -1304,9 +1342,11 @@ class MainActivity : AppCompatActivity() {
                 row("PCI", num(id.pci))
                 row("TAC", num(id.tac))
                 row("EARFCN", num(id.earfcn))
-                row("MCC/MNC", "${id.mccString ?: "—"}/${id.mncString ?: "—"}")
-                id.operatorAlphaLong?.toString()?.takeIf { it.isNotBlank() }
-                    ?.let { row("Carrier", it) }
+                if (mncAvailable) {
+                    row("MCC/MNC", "${id.mccString ?: "—"}/${id.mncString ?: "—"}")
+                    id.operatorAlphaLong?.toString()?.takeIf { it.isNotBlank() }
+                        ?.let { row("Carrier", it) }
+                }
                 row("Signal", sig(info.cellSignalStrength))
             }
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
@@ -1327,7 +1367,9 @@ class MainActivity : AppCompatActivity() {
                 row("LAC", num(id.lac))
                 row("PSC", num(id.psc))
                 row("UARFCN", num(id.uarfcn))
-                row("MCC/MNC", "${id.mccString ?: "—"}/${id.mncString ?: "—"}")
+                if (mncAvailable) {
+                    row("MCC/MNC", "${id.mccString ?: "—"}/${id.mncString ?: "—"}")
+                }
                 row("Signal", sig(info.cellSignalStrength))
             }
             info is android.telephony.CellInfoGsm -> {
@@ -1337,7 +1379,9 @@ class MainActivity : AppCompatActivity() {
                 row("LAC", num(id.lac))
                 row("ARFCN", num(id.arfcn))
                 row("BSIC", num(id.bsic))
-                row("MCC/MNC", "${id.mccString ?: "—"}/${id.mncString ?: "—"}")
+                if (mncAvailable) {
+                    row("MCC/MNC", "${id.mccString ?: "—"}/${id.mncString ?: "—"}")
+                }
                 row("Signal", sig(info.cellSignalStrength))
             }
             else -> {

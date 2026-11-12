@@ -1,5 +1,6 @@
 package com.callagent.gateway.rtp
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
@@ -49,7 +50,10 @@ class RtpSession(
     private val localPort: Int,
     private val remoteAddr: String,
     private val remotePort: Int,
-    private val payloadType: Int = RtpPacket.PT_PCMA
+    // G.722 is the default of the configured codec mode, so it is the
+    // default here too.  Every call site passes the negotiated payload
+    // explicitly; this is only what a session built without one would use.
+    private val payloadType: Int = RtpPacket.PT_G722
 ) {
     private val running = AtomicBoolean(false)
     /** Ensures the stop callback is delivered once, including a session that
@@ -301,6 +305,9 @@ class RtpSession(
      * USAGE_VOICE_COMMUNICATION maps to STREAM_VOICE_CALL which the HAL
      * does NOT inject via incall_music — that's why SIP→GSM was silent.
      */
+    // profile.playbackUsage holds an AudioAttributes.USAGE_* constant; it
+    // arrives as a plain Int, so Lint cannot see that it is one.
+    @SuppressLint("WrongConstant")
     private fun initAudio(): Boolean {
         // Before anything is opened: in-call recording and the per-session
         // voice mutes are gated on the HAL's is_call_active flag, and the HAL
@@ -562,7 +569,15 @@ class RtpSession(
                     // low latency and then handing the framework a large
                     // buffer is contradictory, and the request is silently
                     // ignored.  Let it size the buffer itself.
-                    setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                    //
+                    // setPerformanceMode arrived in Android 8 (API 26).  Below
+                    // that the call is a NoSuchMethodError -- an Error, so the
+                    // catch around the track creation does not catch it.
+                    if (android.os.Build.VERSION.SDK_INT >= 26) {
+                        setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                    } else {
+                        setBufferSizeInBytes(playBufSize)
+                    }
                 } else {
                     setBufferSizeInBytes(playBufSize)
                 }
@@ -1736,14 +1751,34 @@ class RtpSession(
     /**
      * AudioRecord for [source].  Android 8.1 refuses the call sources
      * (VOICE_UPLINK/DOWNLINK/CALL) through the public constructor (8.0 shares
-     * the framework code but is untested): the
-     * AudioAttributes it builds drops a capture preset it does not know, and the
+     * the framework code but is untested): the AudioAttributes it builds goes
+     * through setCapturePreset(), which only accepts DEFAULT, MIC, CAMCORDER,
+     * VOICE_RECOGNITION, VOICE_COMMUNICATION and UNPROCESSED.  VOICE_DOWNLINK
+     * is not among them, so the attributes carry "source -1" and the
      * constructor then throws "Invalid audio source -1".  The hidden
      * (attributes, format, size, session) constructor takes the preset as given,
      * so build the attributes by hand and force the source into them.
      * Only reached when the public constructor throws.
+     *
+     * Both the private field and the hidden constructor are hidden APIs, and
+     * from Android 15 the platform blocks them for apps that target API 35 or
+     * later.  Nothing in an app can work around that: the platform is the only
+     * thing that hands out the VOICE_DOWNLINK source in the first place.  So
+     * the failure is reported plainly and the caller moves on to the next
+     * capture source, instead of the session dying with a bare
+     * NoSuchFieldException.
      */
+    @SuppressLint("SoonBlockedPrivateApi")
     private fun newAudioRecord(source: Int, rate: Int, bufSize: Int): AudioRecord {
+        // RECORD_AUDIO is a runtime permission.  Without it the constructor
+        // throws a SecurityException, and the caller would read that as "this
+        // source is not available on this phone" — which is a different
+        // problem with a different fix.
+        if (context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            throw IllegalArgumentException("RECORD_AUDIO is not granted")
+        }
         try {
             return AudioRecord(
                 source, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize
@@ -1752,22 +1787,31 @@ class RtpSession(
             Log.i(TAG, "AudioRecord source=$source rejected by the public constructor " +
                 "(${e.message}); trying the hidden one")
         }
-        val attrs = AudioAttributes.Builder().build()
-        AudioAttributes::class.java.getDeclaredField("mSource").apply {
-            isAccessible = true
-            setInt(attrs, source)
+        try {
+            val attrs = AudioAttributes.Builder().build()
+            AudioAttributes::class.java.getDeclaredField("mSource").apply {
+                isAccessible = true
+                setInt(attrs, source)
+            }
+            val fmt = AudioFormat.Builder()
+                .setSampleRate(rate)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                .build()
+            val ctor = AudioRecord::class.java.getDeclaredConstructor(
+                AudioAttributes::class.java, AudioFormat::class.java,
+                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
+            )
+            ctor.isAccessible = true
+            return ctor.newInstance(attrs, fmt, bufSize, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioRecord source=$source: the hidden constructor path is not " +
+                "available on this platform (${e.javaClass.simpleName}: ${e.message}). " +
+                "Android 15 blocks the hidden AudioAttributes.mSource field for apps " +
+                "targeting API 35 and later; capturing this source needs the public " +
+                "one to accept it.")
+            throw IllegalArgumentException("audio source $source is not available on this platform", e)
         }
-        val fmt = AudioFormat.Builder()
-            .setSampleRate(rate)
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-            .build()
-        val ctor = AudioRecord::class.java.getDeclaredConstructor(
-            AudioAttributes::class.java, AudioFormat::class.java,
-            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
-        )
-        ctor.isAccessible = true
-        return ctor.newInstance(attrs, fmt, bufSize, 0)
     }
 
     /** Mute or unmute the agent towards the caller. */

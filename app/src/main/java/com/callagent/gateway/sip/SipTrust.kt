@@ -8,7 +8,6 @@ import java.security.cert.CertificateFactory
 import java.security.cert.PKIXParameters
 import java.security.cert.TrustAnchor
 import java.security.cert.X509Certificate
-import java.util.Base64
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
@@ -142,7 +141,7 @@ class SipTrust private constructor(
                 val body = match.groupValues[1].filterNot { it.isWhitespace() }
                 if (body.isEmpty()) continue
                 val der = try {
-                    Base64.getDecoder().decode(body)
+                    Base64.decode(body)
                 } catch (e: IllegalArgumentException) {
                     throw CertificateException("the file contains a certificate block that is not valid base64")
                 }

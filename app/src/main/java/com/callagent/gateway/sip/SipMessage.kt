@@ -184,18 +184,29 @@ class SipMessage private constructor(
         get() {
             val offered = sdpOfferedPayloadTypes
             if (offered.isEmpty()) return null
-            val preferred = sdpPreferredPayloadType
+            val preferred = sdpPreferredPayloadType ?: return null
             return if (preferred in offered) preferred else null
         }
 
-    /** Get the preferred payload type from the remote SDP.
-     *  Collects all payload types offered in the remote m=audio line,
-     *  then picks OUR preferred codec: G.722 > PCMA > PCMU. */
-    val sdpPreferredPayloadType: Int
+    /**
+     * Get the preferred payload type from the remote SDP, or null when the
+     * peer offered no codec this build speaks.
+     *
+     * Collects all payload types offered in the remote m=audio line, then
+     * picks OUR preferred codec: G.722 > PCMA > PCMU.
+     *
+     * Only a payload the peer actually offered may come out of here.  This
+     * value is what the RTP session encodes, and a payload that was never
+     * offered is a stream the peer cannot decode: the old fallback returned
+     * G.722 or PCMA whether or not they were on offer, so an offer of nothing
+     * but telephone-event left the session sending a codec the peer had not
+     * agreed to.
+     */
+    val sdpPreferredPayloadType: Int?
         get() {
             val mLine = body.lineSequence().firstOrNull {
                 it.startsWith("m=audio")
-            } ?: return 8
+            } ?: return SipBuilder.defaultPayloadType()
             val parts = mLine.split(" ")
             // m=audio PORT RTP/AVP pt1 pt2 pt3 ...
             val offered = mutableSetOf<Int>()
@@ -211,8 +222,8 @@ class SipMessage private constructor(
                 else -> null
             }
             return when (SipBuilder.codecMode) {
-                "g711" -> g711 ?: if (9 in offered) 9 else 8
-                else -> if (9 in offered) 9 else (g711 ?: 9)
+                "g711" -> g711 ?: if (9 in offered) 9 else null
+                else -> if (9 in offered) 9 else g711
             }
         }
 
@@ -338,6 +349,19 @@ object SipBuilder {
      */
     @Volatile
     var codecMode: String = "both"
+
+    /**
+     * The payload the configured mode falls back to when the peer offers no
+     * codec this build speaks.
+     *
+     * It is the first payload of the mode's own list, so the answer and the
+     * RTP session still agree with each other: whatever is named is what is
+     * sent.
+     */
+    fun defaultPayloadType(): Int = when (codecMode) {
+        "g711" -> RtpPacket.PT_PCMA
+        else -> RtpPacket.PT_G722
+    }
 
     /**
      * Transport token for Via, and the matching Contact parameter.
@@ -489,10 +513,13 @@ object SipBuilder {
         // server, which may pick a different codec than the one the RTP
         // session was set up for — and then both ends hear noise.
         //
-        // Derived from the request for an initial INVITE (no To tag yet: the
-        // tag is ours and does not exist before we answer).  A re-INVITE is
-        // answered with the codec list the call started with, because the
-        // media session is not renegotiated.
+        // The caller passes the payload the session carries, which is the
+        // authoritative value for an initial INVITE and for a re-INVITE
+        // alike: the media session is not renegotiated, so a re-INVITE has to
+        // be answered with the codec the call already started with.  The
+        // fallback below derives it from the request itself, for an initial
+        // INVITE that has no To tag yet — the tag is ours and does not exist
+        // before we answer.
         val negotiated = negotiatedPayloadType ?: if (msg.method == "INVITE" && msg.toTag == null) {
             msg.sdpNegotiatedPayloadType
         } else null

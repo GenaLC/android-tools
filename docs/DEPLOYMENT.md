@@ -88,7 +88,7 @@ adb shell cmd role get-role-holders android.app.role.DIALER
 
 | Поле | Значение | Примечание |
 |---|---|---|
-| Server | FQDN или IP вашего FreePBX | Для TLS — обязательно FQDN, совпадающий с SAN сертификата |
+| Server | FQDN или IP вашего FreePBX | Должно совпадать с SAN сертификата. По IP работает, если в сертификате есть SAN типа iPAddress (см. [`TLS.md`](TLS.md)) |
 | Port | 5061 | SIP over TLS. 5060 — plaintext SIP |
 | Enable TLS | вкл | По решению — прямой SIP over TLS |
 | Extension | номер расширения | Например `1001` |

@@ -31,6 +31,20 @@ object MediaTekProfiles {
     }
 
     /**
+     * Whether the modem's downlink is capturable through AudioRecord.
+     *
+     * The plan decides it, not the injection mode: only the VOICE_DOWNLINK
+     * capture says the downlink can be read that way.  With the tinycap PCM
+     * the caller's voice comes from an ALSA device instead, and with the
+     * acoustic capture it comes from the microphone — in neither case is the
+     * AudioRecord downlink the right source, and on some devices it opens
+     * successfully and returns silence, which would hold the bridge hostage
+     * until the silence detector retires it.
+     */
+    private fun voiceDownlinkWorks(plan: MediaTekPlan): Boolean =
+        plan.capture == CaptureMethod.VOICE_DOWNLINK
+
+    /**
      * The background-sound player: the modem's own path into the uplink.
      *
      * This is the route upstream verified on the MT6753, and it is the
@@ -57,7 +71,7 @@ object MediaTekProfiles {
         doubleTalkRatio = 1.5f,
         requireSpeakerMode = false,
         incallMusicParam = "",
-        voiceDownlinkWorks = true,
+        voiceDownlinkWorks = voiceDownlinkWorks(plan),
         voiceCallVolPercent = 100,
         // STREAM_VOICE_CALL: the stream type that reaches the BGS player.
         playbackUsage = AudioAttributes.USAGE_VOICE_COMMUNICATION,
@@ -96,7 +110,7 @@ object MediaTekProfiles {
         doubleTalkRatio = 1.5f,
         requireSpeakerMode = false,
         incallMusicParam = "incall_music_enabled",
-        voiceDownlinkWorks = true,
+        voiceDownlinkWorks = voiceDownlinkWorks(plan),
         voiceCallVolPercent = 100,
         // STREAM_MUSIC: the usecase the incall_music mixPort is declared for.
         playbackUsage = -1,
@@ -144,7 +158,7 @@ object MediaTekProfiles {
         doubleTalkRatio = 1.5f,
         requireSpeakerMode = true,
         incallMusicParam = "",
-        voiceDownlinkWorks = true,
+        voiceDownlinkWorks = voiceDownlinkWorks(plan),
         voiceCallVolPercent = 100,
         playbackUsage = -1,
         answerRetry = true,

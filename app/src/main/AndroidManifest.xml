@@ -20,6 +20,10 @@
         tools:ignore="ProtectedPermissions" />
 
     <!-- Phone / GSM call control -->
+    <!-- The gateway is a bridge between a SIP trunk and a cellular leg: it
+         cannot do anything at all without a modem, so the telephony hardware
+         is declared as required rather than optional. -->
+    <uses-feature android:name="android.hardware.telephony" android:required="true" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE"
         tools:ignore="ProtectedPermissions" />

@@ -183,4 +183,60 @@ class SipSdpTest {
         val sdp = ok.substringAfter("\r\n\r\n")
         assertTrue("answer was: $sdp", mediaLine(sdp).endsWith("RTP/AVP 9 8 0 101"))
     }
+
+    /**
+     * The payload the RTP session sends must be one the peer offered.
+     *
+     * The old fallback named G.722 or PCMA whether or not they were on
+     * offer, so a peer that offered nothing but telephone-event ended up with
+     * a session encoding a codec it had never agreed to.
+     */
+    @Test
+    fun thePreferredPayloadIsNeverOneThePeerDidNotOffer() {
+        SipBuilder.codecMode = "both"
+        val invite = incomingInvite("m=audio 4000 RTP/AVP 101")
+        assertTrue(invite.sdpPreferredPayloadType == null)
+        assertTrue(invite.sdpNegotiatedPayloadType == null)
+
+        // And nothing is invented for a peer that offers only a codec this
+        // build has no decoder for.
+        val other = incomingInvite("m=audio 4000 RTP/AVP 96 97")
+        assertTrue(other.sdpPreferredPayloadType == null)
+    }
+
+    /**
+     * The answer names the payload the RTP session carries.
+     *
+     * The session's payload is the authoritative one: it is what goes into
+     * the RTP stream, so the answer has to say the same thing.  This is also
+     * the re-INVITE case, where the media session is not renegotiated.
+     */
+    @Test
+    fun theAnswerNamesThePayloadTheSessionCarries() {
+        SipBuilder.codecMode = "both"
+        val invite = incomingInvite("m=audio 4000 RTP/AVP 9 8 0 101")
+        val ok = SipBuilder.ok200(
+            invite, "1001", "192.168.1.10", 5060, localRtpPort = 5000,
+            negotiatedPayloadType = 0
+        )
+        val sdp = ok.substringAfter("\r\n\r\n")
+        assertTrue("answer was: $sdp", mediaLine(sdp).endsWith("RTP/AVP 0 101"))
+        assertTrue(sdp.contains("a=rtpmap:0 PCMU/8000"))
+        assertFalse(sdp.contains("a=rtpmap:9 G722/8000"))
+    }
+
+    /**
+     * The configured fallback is the first payload of the mode's own list,
+     * so the answer and the session still agree when the peer offered
+     * nothing this build speaks.
+     */
+    @Test
+    fun theFallbackPayloadIsTheConfiguredOne() {
+        SipBuilder.codecMode = "both"
+        assertTrue(SipBuilder.defaultPayloadType() == 9)
+        SipBuilder.codecMode = "g711"
+        assertTrue(SipBuilder.defaultPayloadType() == 8)
+        SipBuilder.codecMode = "g722"
+        assertTrue(SipBuilder.defaultPayloadType() == 9)
+    }
 }

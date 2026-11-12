@@ -2,6 +2,7 @@ package com.callagent.gateway.bridge
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.Manifest
 import android.os.Build
 import android.telecom.Call
 import android.telecom.DisconnectCause
@@ -306,8 +307,16 @@ class CallOrchestrator(
             try {
                 val subId = com.callagent.gateway.gsm.GsmCallManager.subscriptionIdOf(context, account)
                 if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-                    val info = context.getSystemService(SubscriptionManager::class.java)
-                        ?.getActiveSubscriptionInfo(subId)
+                    // getActiveSubscriptionInfo() needs READ_PHONE_STATE.  It
+                    // is a runtime permission: without it the call throws a
+                    // SecurityException, and the incoming call is then
+                    // reported on whichever SIM the fallback picks.
+                    val granted = context.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) ==
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                    val info = if (granted) {
+                        context.getSystemService(SubscriptionManager::class.java)
+                            ?.getActiveSubscriptionInfo(subId)
+                    } else null
                     if (info != null && info.simSlotIndex >= 0) {
                         Log.i(TAG, "Incoming call on SIM slot ${info.simSlotIndex} (subscription $subId)")
                         subId to info.simSlotIndex

@@ -75,7 +75,13 @@ class UdpSipTransport(
         close()
         val f = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_DGRAM, OsConstants.IPPROTO_UDP)
         try {
-            Os.setsockoptInt(f, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1)
+            // Os.setsockoptInt arrived in Android 8 (API 26); below that the
+            // call is a NoSuchMethodError, and it is an Error, so the
+            // catch (e: Exception) below does not catch it.  SO_REUSEADDR is
+            // only an optimisation -- the socket works without it.
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                Os.setsockoptInt(f, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1)
+            }
             // setsockoptTimeval is API 29; below it the timeout is a poll()
             // in receive() instead, or opening a UDP transport crashed with
             // NoSuchMethodError on Android 9.
@@ -196,7 +202,15 @@ class TlsSipTransport(
             // certificate it considers default -- which is then rejected for
             // the wrong reason.  This server's certificate has callagent.pro
             // as a SAN behind a CN of badrenovo.de, so the name must arrive.
-            serverNames = listOf(SNIHostName(host))
+            //
+            // An address is not a name: RFC 6066 says the server_name must
+            // not be an IP literal, and a server that gets one either
+            // ignores it or answers with its default certificate.  With an
+            // address the certificate is matched by its iPAddress SAN, which
+            // the endpoint identification above does on its own.
+            if (!SniHost.isIpAddress(host)) {
+                serverNames = listOf(SNIHostName(host))
+            }
         }
         // Without this the handshake is deferred until the first read, so a
         // certificate failure would surface as a mysterious read error on

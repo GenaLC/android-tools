@@ -522,7 +522,11 @@ class SipClient(
                 else "Server offered SRTP but it is switched off here"
             )
         }
-        call.negotiatedPayloadType = msg.sdpPreferredPayloadType
+        // Only a payload the peer actually offered may be sent.  When the
+        // peer offered no codec this build speaks, the configured fallback is
+        // used, and the answer is built from the same value so that the two
+        // ends of the call still agree on what is being carried.
+        call.negotiatedPayloadType = msg.sdpPreferredPayloadType ?: SipBuilder.defaultPayloadType()
         msg.sdpTelephoneEventPt?.let { call.telephoneEventPt = it }
         Log.i(TAG, "Incoming INVITE codec: pt=${call.negotiatedPayloadType} dtmfPt=${call.telephoneEventPt} codecs=${msg.sdpCodecs}")
 

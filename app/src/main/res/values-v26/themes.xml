@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        The Android 8+ copy of CfgField.  android:importantForAutofill
+        arrived in API 26, so the attribute only exists from there on; the
+        base copy in values/themes.xml leaves it out.  A style of the same
+        name in a qualified folder replaces the base one rather than merging
+        with it, so both copies carry every item.
+    -->
+    <style name="CfgField">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textColorHint">@color/text_hint</item>
+        <item name="android:background">@drawable/input_bg</item>
+        <item name="android:padding">12dp</item>
+        <item name="android:layout_marginTop">4dp</item>
+        <item name="android:importantForAutofill">no</item>
+    </style>
+</resources>

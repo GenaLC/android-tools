@@ -337,7 +337,10 @@ object GsmCallManager {
     @SuppressLint("MissingPermission")
     fun sendMmi(context: Context, dialString: String, onResult: (String) -> Unit) {
         val code = dialString.trim()
-        if (code.endsWith("#")) {
+        // sendUssdRequest arrived in Android 8 (API 26).  Below that the call
+        // is a NoSuchMethodError -- an Error, which the catch below does not
+        // catch -- so there the Telecom path handles the code instead.
+        if (code.endsWith("#") && android.os.Build.VERSION.SDK_INT >= 26) {
             try {
                 val telephony =
                     context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager

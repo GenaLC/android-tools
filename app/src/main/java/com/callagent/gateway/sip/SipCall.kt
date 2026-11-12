@@ -130,7 +130,10 @@ class SipCall(
                 msg.contactAddress?.let { remoteContactAddress = it }
                 msg.sdpRtpPort?.let { remoteRtpPort = it }
                 msg.sdpAddress?.let { remoteRtpAddress = it }
-                negotiatedPayloadType = msg.sdpPreferredPayloadType
+                // Only a payload the peer offered may be sent; the configured
+                // fallback covers a peer that offered no codec this build
+                // speaks, and the answer is built from the same value.
+                negotiatedPayloadType = msg.sdpPreferredPayloadType ?: SipBuilder.defaultPayloadType()
                 msg.sdpTelephoneEventPt?.let { telephoneEventPt = it }
 
                 // We offered SRTP; this is where we find out whether they took
@@ -362,7 +365,13 @@ class SipCall(
             localRtpPort = if ((hasSdp || msg.method == "INVITE") && localRtpPort > 0) localRtpPort else null,
             toTag = localTag,
             srtp = if (srtpActive) localSrtpKeys else null,
-            srtpTag = srtpTag
+            srtpTag = srtpTag,
+            // The media session is not renegotiated, so the answer names the
+            // payload the session is already carrying.  Listing the whole
+            // configured set here would leave the choice to the server, which
+            // may pick a different codec than the one the RTP session was set
+            // up for — and then both ends hear noise.
+            negotiatedPayloadType = negotiatedPayloadType
         )
         sipClient.sendResponse(ok, remoteContactAddress ?: sipClient.serverAddress)
         Log.i(TAG, "Answered $what for call $callId (sdp=$hasSdp)")
@@ -386,7 +395,9 @@ class SipCall(
         val ok = SipBuilder.ok200(
             invite, sipClient.username, sipClient.publicIp, sipClient.localPort,
             localRtpPort = localRtpPort, toTag = toTag,
-            srtp = localSrtpKeys, srtpTag = srtpTag
+            srtp = localSrtpKeys, srtpTag = srtpTag,
+            // The answer names the payload the RTP session is going to send.
+            negotiatedPayloadType = this.negotiatedPayloadType
         )
 
         val address = invite.contactAddress ?: sipClient.serverAddress

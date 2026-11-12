@@ -1,5 +1,6 @@
 package com.callagent.gateway.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -316,6 +317,19 @@ class GatewayService : Service() {
         thread(name = "notif-setup") {
             applyNotificationVisibility()
             silenceDefaultSmsApp()
+        }
+        // The device profile is detected lazily, and on a MediaTek phone the
+        // detection measures the audio HAL through a root shell round trip —
+        // up to five seconds.  Left to the first call, that would be five
+        // seconds of dead air, because the Telecom callback that starts the
+        // bridge runs on the main thread.  It is measured here instead, while
+        // the gateway is still idle.
+        thread(name = "profile-detect") {
+            try {
+                Log.i(TAG, "Device profile: ${com.callagent.gateway.gsm.GsmCallManager.profile.name}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Device profile detection failed: ${e.message}")
+            }
         }
         Log.i(TAG, "GatewayService created")
     }
@@ -901,6 +915,14 @@ class GatewayService : Service() {
         val fallback = prefs.getString("own_number", "")?.trim().orEmpty()
         if (subId < 0) return fallback
         val slot = runCatching {
+            // getActiveSubscriptionInfo() needs READ_PHONE_STATE, which is a
+            // runtime permission; without it the call throws a
+            // SecurityException and the fallback number is used instead.
+            if (checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                return@runCatching null
+            }
             getSystemService(android.telephony.SubscriptionManager::class.java)
                 ?.getActiveSubscriptionInfo(subId)?.simSlotIndex
         }.getOrNull() ?: return fallback
@@ -1417,6 +1439,10 @@ class GatewayService : Service() {
      * so it stops appearing in the system's per-app notification settings on
      * devices that ran an earlier build.
      */
+    // The Android 8 calls below are guarded by Compat.notificationStyle(),
+    // which decides from the API level.  Lint cannot see through an enum
+    // helper, so it reports them as unguarded; the guard is real.
+    @SuppressLint("NewApi")
     private fun createNotificationChannel() {
         // Channels arrived with Android 8.  Below that there is nothing to
         // create: the notification carries its own priority, and the builder
@@ -1498,6 +1524,10 @@ class GatewayService : Service() {
      *  foreground for an SMS does not rewrite what the user sees. */
     @Volatile private var notifState = NotifState.WARN
 
+    // The channel-taking Notification.Builder is Android 8; the branch that
+    // selects it is guarded by Compat.notificationStyle(), which Lint cannot
+    // see through.
+    @SuppressLint("NewApi")
     private fun buildNotification(state: NotifState = NotifState.ERROR, statusText: String = notifStatusText): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pi = PendingIntent.getActivity(
@@ -1893,7 +1923,11 @@ class GatewayService : Service() {
          * the `catch (e: Exception)` around the call sites does not catch.
          * A plain startService() is the equivalent there: the service
          * promotes itself to the foreground as soon as it is up.
+         *
+         * The branch is guarded by Compat.startMethod(), which decides from
+         * the API level; Lint cannot see through an enum helper.
          */
+        @SuppressLint("NewApi")
         private fun startServiceCompat(context: Context, intent: Intent) {
             when (Compat.startMethod(Build.VERSION.SDK_INT)) {
                 Compat.StartMethod.FOREGROUND_SERVICE -> context.startForegroundService(intent)

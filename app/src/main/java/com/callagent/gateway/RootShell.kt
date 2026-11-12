@@ -278,7 +278,7 @@ object RootShell {
     private fun execFallback(cmd: String): Int {
         return try {
             val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            if (proc.waitFor(5, TimeUnit.SECONDS)) proc.exitValue() else -1
+            if (waitForExit(proc, 5_000)) proc.exitValue() else -1
         } catch (e: Exception) {
             Log.w(TAG, "Fallback exec failed: ${e.message}")
             -1
@@ -289,12 +289,38 @@ object RootShell {
         return try {
             val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
             val out = proc.inputStream.bufferedReader().readText().trim()
-            proc.waitFor(5, TimeUnit.SECONDS)
+            waitForExit(proc, 5_000)
             out
         } catch (e: Exception) {
             Log.w(TAG, "Fallback exec failed: ${e.message}")
             ""
         }
+    }
+
+    /**
+     * Wait for [proc] to exit, for at most [timeoutMs] milliseconds.
+     *
+     * Process.waitFor(long, TimeUnit) arrived in Android 8 (API 26), and the
+     * call is a NoSuchMethodError there — an Error, so the
+     * `catch (e: Exception)` around the call sites does not catch it and the
+     * root fallback dies with it.  Below API 26 the exit code is polled
+     * instead: exitValue() throws IllegalThreadStateException while the
+     * process is still running.
+     */
+    private fun waitForExit(proc: Process, timeoutMs: Long): Boolean {
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            return proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                proc.exitValue()
+                return true
+            } catch (_: IllegalThreadStateException) {
+                Thread.sleep(20)
+            }
+        }
+        return false
     }
 
     fun destroy() {

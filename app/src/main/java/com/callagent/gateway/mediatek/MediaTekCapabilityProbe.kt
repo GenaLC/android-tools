@@ -137,6 +137,35 @@ echo '=== MTK_END ==='
             Log.i(TAG, "BGS: no AudioManager reachable — the HAL cannot be asked directly")
             return BgsProbe(BgsParamResult.NOT_TESTED, false)
         }
+        try {
+            return probeBgsParams(am)
+        } finally {
+            // The parameters the probe puts to the HAL include the two that
+            // mute the handset's own speech path.  Leaving them set would mute
+            // the phone's microphone and earpiece with no call in progress,
+            // and nothing else would undo that: the profile restores them when
+            // a bridged call is torn down, which never happens if no call
+            // ever comes.  So the HAL is put back the way it was found,
+            // whether the probe succeeded or not.
+            restoreBgsParams(am)
+        }
+    }
+
+    /**
+     * Put the parameters the probe touched back the way the phone keeps them
+     * when it is an ordinary phone and not a gateway.
+     */
+    private fun restoreBgsParams(am: AudioManager) {
+        for (p in MediaTekBgs.RESTORE_PARAMS) {
+            try {
+                am.setParameters(p)
+            } catch (e: Exception) {
+                Log.i(TAG, "BGS: '$p' could not be restored: ${e.message}")
+            }
+        }
+    }
+
+    private fun probeBgsParams(am: AudioManager): BgsProbe {
         // The parameters that must be refused for the route to be unusable.
         for (p in MediaTekBgs.CALL_PARAMS) {
             try {
