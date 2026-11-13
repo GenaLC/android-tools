@@ -234,6 +234,52 @@ object MediaTekBgs {
 }
 
 /**
+ * Reading the mixer's control list.
+ *
+ * Pure on purpose: the listing is text, and the question "which mute controls
+ * does this build have?" is a question about that text.  The answer decides
+ * whether the handset's own microphone stays in the call, so it is worth
+ * testing on its own.
+ *
+ * The measurement that produced this: a Cubot X100 (MT6855V, Android 15)
+ * answered "control not found" for Set_BGS_UL_Mute, Set_SpeechCall_UL_Mute
+ * and incall_music_enabled, and offered Speech_UL_Mute / Speech_DL_Mute
+ * instead.
+ */
+object MediaTekMixer {
+
+    /**
+     * The control names in a `tinymix` listing.
+     *
+     * tinymix prints one control per line, tab separated: index, type,
+     * channel, name, value.  The name is the fourth field; the lines that
+     * are not controls are skipped.
+     */
+    fun controlNames(listing: String): Set<String> {
+        val names = HashSet<String>()
+        for (line in listing.lines()) {
+            val fields = line.split('\t')
+            if (fields.size < 4) continue
+            val name = fields[3].trim()
+            if (name.isNotEmpty()) names += name
+        }
+        return names
+    }
+
+    /** Which mute family the given controls make possible. */
+    fun muteFamily(controls: Set<String>): SpeechMuteFamily = when {
+        controls.contains(MediaTekSpeechMutes.MODERN_UL) ||
+            controls.contains(MediaTekSpeechMutes.MODERN_DL) -> SpeechMuteFamily.MODERN_MIXER
+        controls.contains(LEGACY_UL) || controls.contains(LEGACY_DL) -> SpeechMuteFamily.LEGACY_HAL
+        else -> SpeechMuteFamily.NONE
+    }
+
+    /** The controls of the older generation, by name. */
+    const val LEGACY_UL = "Set_SpeechCall_UL_Mute"
+    const val LEGACY_DL = "Set_SpeechCall_DL_Mute"
+}
+
+/**
  * The controls that take the handset itself out of the call.
  *
  * Two generations, two spellings, and they are not interchangeable: the

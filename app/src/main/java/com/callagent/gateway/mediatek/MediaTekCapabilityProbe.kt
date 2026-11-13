@@ -110,16 +110,10 @@ echo '=== MTK_END ==='
         // Which mute controls this mixer actually has.  A control that is not
         // listed cannot be written, and writing it fails quietly — the shell
         // swallows "control not found" — so the list is the evidence.
-        val mixerControls = mixerControlNames(
+        val mixerControls = MediaTekMixer.controlNames(
             root.substringAfter("=== MTK_MIXER ===").substringBefore("=== MTK_MIXER_END ===")
         )
-        val muteFamily = when {
-            mixerControls.contains(MediaTekSpeechMutes.MODERN_UL) ||
-                mixerControls.contains(MediaTekSpeechMutes.MODERN_DL) -> SpeechMuteFamily.MODERN_MIXER
-            mixerControls.contains(LEGACY_UL_CONTROL) ||
-                mixerControls.contains(LEGACY_DL_CONTROL) -> SpeechMuteFamily.LEGACY_HAL
-            else -> SpeechMuteFamily.NONE
-        }
+        val muteFamily = MediaTekMixer.muteFamily(mixerControls)
 
         // ── the HAL's own speech-mute parameters, for the older generation ──
         val legacyMutes = probeLegacySpeechMutes(context)
@@ -147,16 +141,6 @@ echo '=== MTK_END ==='
      * tinymix prints one control per line, tab separated: index, type,
      * channel, name, value.  The name is the fourth field.
      */
-    private fun mixerControlNames(section: String): Set<String> {
-        val names = HashSet<String>()
-        for (line in section.lines()) {
-            val fields = line.split('\t')
-            if (fields.size < 4) continue
-            val name = fields[3].trim()
-            if (name.isNotEmpty()) names += name
-        }
-        return names
-    }
 
     // ── the BGS half ─────────────────────────────────────────────────────
 
@@ -419,8 +403,4 @@ echo '=== MTK_END ==='
 
     /** Names that mark the downlink leg of a telephony pair. */
     private val RX_PREFERRED = listOf("_rx", " rx", "rx_", "rec", "capture", "downlink", "_dl", " dl")
-
-    /** The mixer controls of the older generation, by name. */
-    private const val LEGACY_UL_CONTROL = "Set_SpeechCall_UL_Mute"
-    private const val LEGACY_DL_CONTROL = "Set_SpeechCall_DL_Mute"
 }
