@@ -158,8 +158,11 @@ else
 fi
 
 # The route that actually matters: does anything mix into Telephony Tx, and
-# is incall_music_uplink one of the sources?
-TX_ROUTE=$(echo "$POLICY" | tr '<' '\n' | grep 'route type="mix" sink="Telephony Tx"' | head -1)
+# is incall_music_uplink one of the sources?  The route element is wrapped
+# over several lines, so the policy is flattened before it is parsed —
+# otherwise the sources attribute is cut off from the element it belongs to.
+FLAT=$(echo "$POLICY" | tr '\n' ' ')
+TX_ROUTE=$(echo "$FLAT" | grep -oE 'route type="mix" sink="Telephony Tx"[^>]*' | head -1)
 if [ -n "$TX_ROUTE" ]; then
     ok "a route mixes into Telephony Tx"
     echo "            $TX_ROUTE" | sed 's/^ *//' | tr -s ' ' | sed 's/^/            /'
