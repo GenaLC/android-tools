@@ -166,8 +166,18 @@ bind=0.0.0.0:5060
 type=transport
 protocol=tls
 bind=0.0.0.0:5061
-tls_cert_file=/etc/asterisk/keys/asterisk.crt
-tls_key_file=/etc/asterisk/keys/asterisk.key
+; ВНИМАНИЕ: у транспорта res_pjsip сертификат называется cert_file /
+; priv_key_file.  Опции tls_cert_file / tls_key_file — это из chan_sip
+; (sip.conf), транспорт их не понимает и молча поднимется без сертификата.
+cert_file=/etc/asterisk/keys/asterisk.crt
+priv_key_file=/etc/asterisk/keys/asterisk.key
+; Версия TLS: Android 15 не принимает 1.0/1.1, шлюз говорит 1.2 и 1.3.
+; Без этой строки транспорт берёт значение по умолчанию, а оно в некоторых
+; сборках FreePBX — TLS 1.0, и handshake не состоится.
+method=tlsv1_2
+; Клиентские сертификаты не проверяем, серверный — проверяем.
+verify_client=no
+verify_server=yes
 
 [1001]
 type=endpoint
@@ -426,7 +436,12 @@ match=192.168.1.10
   а не заменяет его;
 - имя в поле Server должно совпадать с SAN сертификата. Подключение по IP
   тоже работает, но тогда в сертификате должен быть SAN типа iPAddress:
-  `tools/gen-pbx-cert.sh --host 10.0.0.5` добавляет его сам.
+  `tools/gen-pbx-cert.sh --host 10.0.0.5` добавляет его сам;
+- версия TLS — **1.2 или 1.3**. Android 15 запрещает TLS 1.0/1.1 для
+  приложений с `targetSdk 35`, поэтому шлюз их не предлагает, а транспорт PBX
+  должен быть `method=tlsv1_2` (Settings → Asterisk SIP Settings →
+  `chan_pjsip` → SSL Method). Подробнее — в [`../TLS.md`](../TLS.md), раздел
+  «Версия TLS на транспорте».
 
 Полная процедура — в [`../TLS.md`](../TLS.md): создание CA и сертификата,
 установка на PBX, импорт CA на телефоне и расшифровка ошибок в логе.
@@ -446,6 +461,10 @@ asterisk -rx "pjsip show transports"
 tlscertfile = /etc/asterisk/keys/asterisk.crt
 tlskeyfile  = /etc/asterisk/keys/asterisk.key
 ```
+
+Это путь FreePBX и `chan_sip`; для `res_pjsip` сертификат задаётся в самой
+секции транспорта (`cert_file=` / `priv_key_file=`, см. §3) — FreePBX пишет
+туда же пути из SIP Settings.
 
 После правки: `asterisk -rx "pjsip set tls on"`.
 
@@ -476,6 +495,7 @@ asterisk -rx "pjsip show channelstats"
 | Звонок идёт, но через ~20 с обрывается | Слишком короткий `Dial()` — поставьте 60 |
 | Звонок идёт, звука нет, в `channelstats` другой кодек | Эндпоинт разрешает не тот кодек, который согласован; сверьте `allow` с §6 |
 | Входящий от SIM не маршрутизируется | Контекст эндпоинта не `from-gsm-gateway` либо `Dial()` уходит не в тот транк |
+| `no usable TLS version ...` в логе телефона | Транспорт PBX ограничен TLS 1.0/1.1; нужен `method=tlsv1_2` — см. §7 и `../TLS.md` |
 
 ## 9. Замечания по RTCP
 

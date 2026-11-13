@@ -49,6 +49,20 @@ tlscertfile = /etc/asterisk/keys/asterisk.crt
 tlskeyfile  = /etc/asterisk/keys/asterisk.key
 ```
 
+Это делает FreePBX (SIP Settings) и использует `chan_sip`. Для `res_pjsip`
+сертификат указывается **в самой секции транспорта** — там опции называются
+`cert_file=` и `priv_key_file=` (не `tls_cert_file`/`tls_key_file`):
+
+```ini
+[0.0.0.0-tls]
+type=transport
+protocol=tls
+bind=0.0.0.0:5061
+cert_file=/etc/asterisk/keys/asterisk.crt
+priv_key_file=/etc/asterisk/keys/asterisk.key
+method=tlsv1_2
+```
+
 Затем включить TLS-слушатель и проверить:
 
 ```bash
@@ -59,6 +73,46 @@ asterisk -rx "pjsip show tls"
 В `pjsip show tls` должны быть видны ваши файлы и состояние `Enabled: yes`.
 Порт TLS по умолчанию — 5061; он должен быть открыт на PBX и достижим с
 телефона.
+
+### Версия TLS на транспорте
+
+Android 15 **запрещает** TLS 1.0 и 1.1 для приложений с `targetSdk 35` —
+Conscrypt отключает их на уровне платформы ([Conscrypt: Changes in Android
+15](https://source.android.com/docs/core/ota/modular-system/conscrypt)).
+Шлюз в силу этого говорит только **TLS 1.2 и 1.3**, и никогда не согласует
+1.0/1.1.
+
+Значит, TLS-транспорт PBX должен быть на 1.2. Проверьте:
+
+```bash
+grep -A15 '\[0.0.0.0-tls\]' /etc/asterisk/pjsip.transports.conf
+asterisk -rx "pjsip show transports"
+```
+
+В секции транспорта должна быть строка:
+
+```ini
+method=tlsv1_2
+```
+
+Как её получить:
+
+| Способ | Что делать |
+|---|---|
+| Через GUI (правильный) | Settings → Asterisk SIP Settings → `chan_pjsip` → **SSL Method: tlsv1_2**, затем Apply Config |
+| Если GUI не записал строку | Известная особенность FreePBX: поле SSL Method не всегда попадает в `pjsip.transports.conf`. Тогда строку надо дописать в файл руками — но FreePBX перегенерирует этот файл при Apply Config, поэтому проверяйте результат после каждого Apply |
+
+Если транспорт остался на `method=tlsv1` или `tlsv1_1` (а в некоторых
+сборках FreePBX строка `method=` отсутствует вовсе и берётся значение по
+умолчанию), handshake не состоится. В логе телефона это выглядит так:
+
+```
+no usable TLS version for 159.100.13.216:5061 — this phone speaks TLS 1.2 and 1.3,
+the peer offers TLSv1; the PBX TLS transport must be method=tlsv1_2
+```
+
+Альтернатива — не использовать TLS для этой ноги: приложение умеет и обычный
+SIP over UDP на 5060, но тогда пароль digest-аутентификации передаётся открыто.
 
 ## 3. Импортировать CA на телефоне
 
@@ -80,6 +134,7 @@ asterisk -rx "pjsip show tls"
 | `the server's certificate is not trusted: it is not signed by a CA in the system store and no certificate authority has been imported in Settings` | CA не импортирован — импортируйте `ca.pem` |
 | `... nor by the N imported certificate(s)` | Импортирован другой CA. Проверьте, что на PBX установлен сертификат, подписанный именно им |
 | `TLS handshake timed out to host:5061 — is 5061 the TLS port?` | На порту нет TLS. Проверьте `pjsip show tls` и то, что телефон стучится на 5061, а не на 5060 |
+| `no usable TLS version for host:port — ... the PBX TLS transport must be method=tlsv1_2` | Транспорт PBX ограничен TLS 1.0/1.1, а Android 15 их не принимает. Нужно `method=tlsv1_2` в секции транспорта — см. §2 «Версия TLS на транспорте» |
 | Ошибка проверки имени (hostname mismatch) | Имя в SAN не совпадает с тем, что в поле Server. Сертификат проверяется по имени, импорт CA этого не меняет |
 
 ## 5. Если сертификат на PBX всё-таки есть

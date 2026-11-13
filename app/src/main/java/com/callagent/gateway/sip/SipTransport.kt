@@ -189,6 +189,21 @@ class TlsSipTransport(
         val s = openSocket(factory, host, port)
         s.soTimeout = soTimeoutMs
         s.tcpNoDelay = true
+        // Say explicitly which TLS versions we speak.  Android 15 forbids TLS
+        // 1.0 and 1.1 for apps that target it, and a PBX whose transport is
+        // limited to one of those will simply fail the handshake with an
+        // error that names neither side of the cause.  Naming the versions
+        // turns that into a configuration hint.
+        val protocols = TlsProtocols.negotiable(s.supportedProtocols)
+        if (protocols.isEmpty()) {
+            val offered = s.supportedProtocols?.joinToString(", ")?.takeIf { it.isNotBlank() }
+                ?: "nothing"
+            throw java.io.IOException(
+                "no usable TLS version for $host:$port — this phone speaks TLS 1.2 and 1.3, " +
+                    "the peer offers $offered; the PBX TLS transport must be method=tlsv1_2"
+            )
+        }
+        s.enabledProtocols = protocols.toTypedArray()
         // A bare SSLSocket validates the chain but NOT the hostname -- that
         // check lives in HttpsURLConnection, not in the socket, so without
         // this any certificate signed by any trusted CA would be accepted for
