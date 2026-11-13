@@ -40,7 +40,14 @@ cat /proc/asound/cards 2>/dev/null
 echo '=== MTK_PCMS ==='
 cat /proc/asound/pcm 2>/dev/null
 echo '=== MTK_TINYMIX ==='
-for p in $TINYMIX_CANDIDATES; do [ -x "${'$'}p" ] && "${'$'}p" >/dev/null 2>&1 && echo "TINYMIX:${'$'}p"; done
+for p in $TINYMIX_CANDIDATES; do
+  if [ -x "${'$'}p" ]; then
+    echo "TINYMIX:${'$'}p"
+    echo '=== MTK_MIXER ==='
+    "${'$'}p" 2>/dev/null
+    echo '=== MTK_MIXER_END ==='
+  fi
+done
 echo '=== MTK_END ==='
 """.trimIndent()
 
@@ -100,6 +107,23 @@ echo '=== MTK_END ==='
             telephonyRxSampleRate(policy),
         )
 
+        // Which mute controls this mixer actually has.  A control that is not
+        // listed cannot be written, and writing it fails quietly — the shell
+        // swallows "control not found" — so the list is the evidence.
+        val mixerControls = mixerControlNames(
+            root.substringAfter("=== MTK_MIXER ===").substringBefore("=== MTK_MIXER_END ===")
+        )
+        val muteFamily = when {
+            mixerControls.contains(MediaTekSpeechMutes.MODERN_UL) ||
+                mixerControls.contains(MediaTekSpeechMutes.MODERN_DL) -> SpeechMuteFamily.MODERN_MIXER
+            mixerControls.contains(LEGACY_UL_CONTROL) ||
+                mixerControls.contains(LEGACY_DL_CONTROL) -> SpeechMuteFamily.LEGACY_HAL
+            else -> SpeechMuteFamily.NONE
+        }
+
+        // ── the HAL's own speech-mute parameters, for the older generation ──
+        val legacyMutes = probeLegacySpeechMutes(context)
+
         return MediaTekCapabilities(
             rootAvailable = rootAvailable,
             tinymixAvailable = tinymixAvailable,
@@ -112,7 +136,26 @@ echo '=== MTK_END ==='
             telephonyRxDevicePort = telephonyRxDevicePort,
             telephonyRxInPolicy = telephonyRxInPolicy,
             telephonyRxPcm = pcm,
+            speechMuteFamily = muteFamily,
+            legacySpeechMuteAccepted = legacyMutes,
         )
+    }
+
+    /**
+     * The names of the mixer controls this build has.
+     *
+     * tinymix prints one control per line, tab separated: index, type,
+     * channel, name, value.  The name is the fourth field.
+     */
+    private fun mixerControlNames(section: String): Set<String> {
+        val names = HashSet<String>()
+        for (line in section.lines()) {
+            val fields = line.split('\t')
+            if (fields.size < 4) continue
+            val name = fields[3].trim()
+            if (name.isNotEmpty()) names += name
+        }
+        return names
     }
 
     // ── the BGS half ─────────────────────────────────────────────────────
@@ -189,8 +232,39 @@ echo '=== MTK_END ==='
                 return BgsProbe(BgsParamResult.ACCEPTED, false)
             }
         }
-        Log.i(TAG, "BGS: the HAL took and confirmed all four parameters")
+        Log.i(TAG, "BGS: the HAL took and confirmed all ${MediaTekBgs.CALL_PARAMS.size} parameters")
         return BgsProbe(BgsParamResult.ACCEPTED, true)
+    }
+
+    /**
+     * Ask the HAL whether it takes the older generation's speech-mute
+     * parameters.
+     *
+     * The X100's mixer has no such control, and its HAL refused them in the
+     * same breath — but on the MT6753 these were the only way to take the
+     * handset out of the call, so they are still asked about.
+     */
+    private fun probeLegacySpeechMutes(context: Context?): Boolean {
+        val am = audioManager(context) ?: return false
+        return try {
+            for (p in MediaTekSpeechMutes.LEGACY_CALL_PARAMS) {
+                am.setParameters(p)
+            }
+            Log.i(TAG, "Mutes: the HAL took the Set_SpeechCall_* parameters")
+            true
+        } catch (e: Exception) {
+            Log.i(TAG, "Mutes: the HAL refused the Set_SpeechCall_* parameters: ${e.message}")
+            false
+        } finally {
+            // A mute left on is a phone that cannot hear its owner.
+            for (p in MediaTekSpeechMutes.LEGACY_RESTORE_PARAMS) {
+                try {
+                    am.setParameters(p)
+                } catch (e: Exception) {
+                    Log.i(TAG, "Mutes: '$p' could not be restored: ${e.message}")
+                }
+            }
+        }
     }
 
     /**
@@ -345,4 +419,8 @@ echo '=== MTK_END ==='
 
     /** Names that mark the downlink leg of a telephony pair. */
     private val RX_PREFERRED = listOf("_rx", " rx", "rx_", "rec", "capture", "downlink", "_dl", " dl")
+
+    /** The mixer controls of the older generation, by name. */
+    private const val LEGACY_UL_CONTROL = "Set_SpeechCall_UL_Mute"
+    private const val LEGACY_DL_CONTROL = "Set_SpeechCall_DL_Mute"
 }

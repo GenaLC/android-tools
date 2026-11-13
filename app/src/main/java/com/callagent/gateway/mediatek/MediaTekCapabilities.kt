@@ -85,6 +85,33 @@ enum class BgsParamResult {
 }
 
 /**
+ * Which mute controls keep the handset itself out of the bridged call.
+ *
+ * The names changed between MediaTek generations, and the gateway has to use
+ * the ones the phone actually has:
+ *
+ *  - the MT6753 generation (upstream's phone, Android 8.1) took them as HAL
+ *    parameters: Set_SpeechCall_UL_Mute / Set_SpeechCall_DL_Mute;
+ *  - the MT6855V generation (Cubot X100, Android 15) has no such parameter —
+ *    tinymix answers "control not found" — but offers mixer controls of its
+ *    own: Speech_UL_Mute / Speech_DL_Mute.
+ *
+ * Writing a name the build does not have is not an error: the shell swallows
+ * the complaint.  It is a mute that never happens, with the handset's own
+ * microphone still in the call.  So the family is measured, not guessed.
+ */
+enum class SpeechMuteFamily {
+    /** No mute of any kind was found — the handset stays in the call. */
+    NONE,
+
+    /** The HAL parameters of the older generation. */
+    LEGACY_HAL,
+
+    /** The mixer controls of the newer generation. */
+    MODERN_MIXER,
+}
+
+/**
  * An ALSA PCM found on the device.
  *
  * [card] and [device] are the numbers `tinycap -- -D <card> -d <device>`
@@ -137,6 +164,22 @@ data class MediaTekCapabilities(
 
     /** A telephony-rx capture PCM that tinycap could read, if one exists. */
     val telephonyRxPcm: AlsaPcm? = null,
+
+    /**
+     * Which mute controls the mixer of this build was found to have.
+     *
+     * Measured by listing the mixer controls: a control that is not there
+     * cannot be written, and the write fails quietly.
+     */
+    val speechMuteFamily: SpeechMuteFamily = SpeechMuteFamily.NONE,
+
+    /**
+     * The HAL took the older generation's speech-mute parameters.
+     *
+     * The evidence for [SpeechMuteFamily.LEGACY_HAL] when the mixer does not
+     * list the controls: the parameter was put to the HAL and came back.
+     */
+    val legacySpeechMuteAccepted: Boolean = false,
 ) {
     /**
      * Whether AudioSource.VOICE_DOWNLINK has a route to read from.
@@ -161,31 +204,74 @@ data class MediaTekPlan(
     val capture: CaptureMethod,
     /** The PCM to read the caller from, when [capture] is TINYCAP_PCM. */
     val telephonyRxPcm: AlsaPcm?,
+    /** Which mute controls the profile uses to keep the handset out of the call. */
+    val speechMutes: SpeechMuteFamily = SpeechMuteFamily.NONE,
     val notes: List<String>,
 )
 
 /**
- * The four HAL parameters that make the background-sound player work.
+ * The HAL parameters of the background-sound player.
  *
  * They are the ones the MT6753 profile sets during a call, and the ones the
  * probe puts to the HAL to find out whether this build has them at all.
+ *
+ * The speech mutes that go with them live in [MediaTekSpeechMutes]: they are
+ * a separate question, because a build can have the BGS parameters and no
+ * speech mute at all — the Cubot X100 is exactly that case.
  */
 object MediaTekBgs {
-    /** Set once the call is up: agent into the uplink, handset out of the call. */
+    /** Set once the call is up: agent into the uplink, handset off the earpiece. */
     val CALL_PARAMS = listOf(
         "Set_BGS_UL_Mute=0",         // injected audio reaches the caller
         "Set_BGS_DL_Mute=1",         // ... and no longer plays on the earpiece
-        "Set_SpeechCall_UL_Mute=1",  // handset microphone out of the call
-        "Set_SpeechCall_DL_Mute=1",  // caller no longer plays on the earpiece
     )
 
     /** The other way round, for ordinary phone use after the call. */
     val RESTORE_PARAMS = listOf(
         "Set_BGS_UL_Mute=1",
         "Set_BGS_DL_Mute=0",
+    )
+}
+
+/**
+ * The controls that take the handset itself out of the call.
+ *
+ * Two generations, two spellings, and they are not interchangeable: the
+ * X100's mixer has no Set_SpeechCall_* control at all.
+ */
+object MediaTekSpeechMutes {
+
+    /** The HAL parameters of the older generation. */
+    val LEGACY_CALL_PARAMS = listOf(
+        "Set_SpeechCall_UL_Mute=1",  // handset microphone out of the call
+        "Set_SpeechCall_DL_Mute=1",  // caller no longer plays on the earpiece
+    )
+
+    /** The other way round, for ordinary phone use after the call. */
+    val LEGACY_RESTORE_PARAMS = listOf(
         "Set_SpeechCall_UL_Mute=0",
         "Set_SpeechCall_DL_Mute=0",
     )
+
+    /** The mixer control of the newer generation for the uplink leg. */
+    const val MODERN_UL = "Speech_UL_Mute"
+
+    /** The mixer control of the newer generation for the downlink leg. */
+    const val MODERN_DL = "Speech_DL_Mute"
+
+    /**
+     * The mixer commands that mute the handset during the call.
+     *
+     * `Speech_Mic_Mute` is deliberately left alone: it is the voice-recording
+     * mute and its polarity differs between builds, so touching it could
+     * mute the agent's own microphone.
+     */
+    fun modernSetupCmd(): String =
+        "tinymix '$MODERN_UL' 1 2>/dev/null; tinymix '$MODERN_DL' 1 2>/dev/null"
+
+    /** The mixer commands that give the handset back its voice. */
+    fun modernRestoreCmd(): String =
+        "tinymix '$MODERN_UL' 0 2>/dev/null; tinymix '$MODERN_DL' 0 2>/dev/null"
 }
 
 /**
@@ -287,10 +373,34 @@ object MediaTekPlanner {
             }
         }
 
+        // Which mute controls to write.  The mixer listing is the evidence:
+        // a control that is not listed cannot be written, and writing it
+        // fails quietly.  The HAL parameters of the older generation are the
+        // fallback, but only when the HAL actually took them.
+        val mutes = when {
+            caps.speechMuteFamily == SpeechMuteFamily.MODERN_MIXER -> {
+                notes += "mutes: the mixer has ${MediaTekSpeechMutes.MODERN_UL} / " +
+                    "${MediaTekSpeechMutes.MODERN_DL} — the handset is taken out of the call " +
+                    "through them"
+                SpeechMuteFamily.MODERN_MIXER
+            }
+            caps.speechMuteFamily == SpeechMuteFamily.LEGACY_HAL || caps.legacySpeechMuteAccepted -> {
+                notes += "mutes: the HAL takes the Set_SpeechCall_* parameters — the handset is " +
+                    "taken out of the call through them"
+                SpeechMuteFamily.LEGACY_HAL
+            }
+            else -> {
+                notes += "mutes: no usable mute control was found — the handset's own " +
+                    "microphone stays in the call"
+                SpeechMuteFamily.NONE
+            }
+        }
+
         return MediaTekPlan(
             injection = injection,
             capture = capture,
             telephonyRxPcm = if (capture == CaptureMethod.TINYCAP_PCM) caps.telephonyRxPcm else null,
+            speechMutes = mutes,
             notes = notes,
         )
     }

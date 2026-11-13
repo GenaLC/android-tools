@@ -54,15 +54,16 @@ object MediaTekProfiles {
      */
     private fun bgs(label: String, plan: MediaTekPlan) = DeviceProfile(
         name = "$label (MediaTek) ${plan.injection} / ${plan.capture}",
-        // No mixer work: the MediaTek ALSA card has no routing matrix the
-        // bridge can drive — the HAL does the in-call routing itself.  The
-        // four parameters below are the whole of the control surface.
-        mixerSetupCmd = "",
-        mixerRestoreCmd = "",
+        // The MediaTek ALSA card has no routing matrix the bridge can drive
+        // — the HAL does the in-call routing itself.  What the mixer does
+        // have is the speech mutes, on some generations under one name and
+        // on others under another; the probe found out which.
+        mixerSetupCmd = modernMuteCmd(plan),
+        mixerRestoreCmd = modernRestoreCmd(plan),
         mixerIncallMusicCmd = "",
         mixerVerifyCmd = "",
-        halCallParams = MediaTekBgs.CALL_PARAMS,
-        halCallParamsRestore = MediaTekBgs.RESTORE_PARAMS,
+        halCallParams = MediaTekBgs.CALL_PARAMS + legacyMuteParams(plan),
+        halCallParamsRestore = MediaTekBgs.RESTORE_PARAMS + legacyRestoreParams(plan),
         musicVolPercent = 20,
         captureGain = 1,
         playbackGain = 1,
@@ -86,22 +87,47 @@ object MediaTekProfiles {
     )
 
     /**
+     * The mixer commands that mute the handset, when this build has them.
+     *
+     * Empty on a build whose mixer has no such control: writing a name that
+     * is not there fails quietly, and a command that does nothing is better
+     * than a command that pretends.
+     */
+    private fun modernMuteCmd(plan: MediaTekPlan): String =
+        if (plan.speechMutes == SpeechMuteFamily.MODERN_MIXER) MediaTekSpeechMutes.modernSetupCmd() else ""
+
+    /** The mixer commands that give the handset its voice back. */
+    private fun modernRestoreCmd(plan: MediaTekPlan): String =
+        if (plan.speechMutes == SpeechMuteFamily.MODERN_MIXER) MediaTekSpeechMutes.modernRestoreCmd() else ""
+
+    /** The HAL parameters that mute the handset, when this build takes them. */
+    private fun legacyMuteParams(plan: MediaTekPlan): List<String> =
+        if (plan.speechMutes == SpeechMuteFamily.LEGACY_HAL) MediaTekSpeechMutes.LEGACY_CALL_PARAMS else emptyList()
+
+    /** The HAL parameters that undo the handset mute. */
+    private fun legacyRestoreParams(plan: MediaTekPlan): List<String> =
+        if (plan.speechMutes == SpeechMuteFamily.LEGACY_HAL) MediaTekSpeechMutes.LEGACY_RESTORE_PARAMS else emptyList()
+
+    /**
      * The audio policy's incall_music route: the playback track asks the
      * policy manager for the telephony TX device, and the policy routes it
      * into the modem's uplink.
      */
     private fun incallMusic(label: String, plan: MediaTekPlan) = DeviceProfile(
         name = "$label (MediaTek) ${plan.injection} / ${plan.capture}",
-        // No mixer work either: on this route the policy and the HAL do it.
-        mixerSetupCmd = "",
-        mixerRestoreCmd = "",
+        // The speech mutes are not part of the BGS route: they keep the
+        // handset out of the call on this route too, and this build has them
+        // under the other name.
+        mixerSetupCmd = modernMuteCmd(plan),
+        mixerRestoreCmd = modernRestoreCmd(plan),
         mixerIncallMusicCmd = "",
         mixerVerifyCmd = "",
-        // The BGS parameters are deliberately absent: the probe found the
-        // HAL did not take them, and a parameter the HAL refuses is only a
-        // warning in the log.
-        halCallParams = emptyList(),
-        halCallParamsRestore = emptyList(),
+        // The BGS parameters are deliberately absent: this route does not use
+        // the background-sound player, and a parameter the HAL refuses is
+        // only a warning in the log.  The speech mutes stay — they are not
+        // BGS parameters.
+        halCallParams = legacyMuteParams(plan),
+        halCallParamsRestore = legacyRestoreParams(plan),
         musicVolPercent = 20,
         captureGain = 1,
         playbackGain = 1,

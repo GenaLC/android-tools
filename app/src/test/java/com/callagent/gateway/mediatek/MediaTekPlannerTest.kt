@@ -175,4 +175,57 @@ class MediaTekPlannerTest {
             plan.notes.any { it.contains("BGS") },
         )
     }
+
+    // ── the handset mutes ────────────────────────────────────────────────
+
+    /**
+     * The X100's mixer has no Set_SpeechCall_* control and never had one:
+     * it offers Speech_UL_Mute and Speech_DL_Mute instead.  A profile that
+     * wrote the first names would leave the handset's own microphone in the
+     * call without saying so.
+     */
+    @Test
+    fun theMixerControlsAreUsedWhenTheyAreTheOnesThatExist() {
+        val x100 = MediaTekCapabilities(
+            rootAvailable = true,
+            bgsInHal = true,
+            bgsParamResult = BgsParamResult.ACCEPTED,
+            speechMuteFamily = SpeechMuteFamily.MODERN_MIXER,
+        )
+        val plan = MediaTekPlanner.plan(x100)
+        assertEquals(SpeechMuteFamily.MODERN_MIXER, plan.speechMutes)
+        assertTrue(
+            "the plan must name the controls it will write",
+            plan.notes.any { it.contains("Speech_UL_Mute") },
+        )
+    }
+
+    @Test
+    fun theLegacyParametersAreUsedWhenTheMixerHasNoSuchControls() {
+        val mt6753 = MediaTekCapabilities(
+            rootAvailable = true,
+            bgsInHal = true,
+            bgsParamResult = BgsParamResult.ACCEPTED,
+            speechMuteFamily = SpeechMuteFamily.LEGACY_HAL,
+        )
+        assertEquals(SpeechMuteFamily.LEGACY_HAL, MediaTekPlanner.plan(mt6753).speechMutes)
+    }
+
+    /** The HAL taking the legacy parameters is evidence in its own right. */
+    @Test
+    fun legacyParametersAcceptedByTheHalAreEnough() {
+        val caps = MediaTekCapabilities(legacySpeechMuteAccepted = true)
+        assertEquals(SpeechMuteFamily.LEGACY_HAL, MediaTekPlanner.plan(caps).speechMutes)
+    }
+
+    @Test
+    fun withoutAnyMuteThePlanSaysSo() {
+        val caps = MediaTekCapabilities()
+        val plan = MediaTekPlanner.plan(caps)
+        assertEquals(SpeechMuteFamily.NONE, plan.speechMutes)
+        assertTrue(
+            "the plan must admit that the handset stays in the call",
+            plan.notes.any { it.contains("microphone stays in the call") },
+        )
+    }
 }
