@@ -42,10 +42,36 @@ tools/gen-pbx-cert.sh --host pbx.example.com --outdir ~/pbx-cert
 
 ## 2. Установить сертификат на PBX
 
+> На сервере из `docs/freepbx/README.md` §0 TLS-транспорта нет: в `pjsip show
+> transports` только `0.0.0.0-udp` на 6064. Включение TLS — это шаг 1 ниже
+> плюс включение самого транспорта в GUI.
+
 ```bash
 sudo install -m 644 ~/pbx-cert/server.pem /etc/asterisk/keys/asterisk.crt
 sudo install -m 600 ~/pbx-cert/server-key.pem /etc/asterisk/keys/asterisk.key
 ```
+
+Включение транспорта в GUI FreePBX 16:
+**Settings → Asterisk SIP Settings → SIP Settings [chan_pjsip]** →
+раздел **TLS/SSL/SRTP Settings**:
+
+| Поле | Значение |
+|---|---|
+| Certificate File | `/etc/asterisk/keys/asterisk.crt` |
+| Private Key File | `/etc/asterisk/keys/asterisk.key` |
+| **SSL Method** | **`tlsv1_2`** — не `Default` и не `tlsv1` |
+| Verify Client | No |
+| Verify Server | Yes |
+
+и раздел **Transports**: `tls — 0.0.0.0 — All` → **Yes** (порт 5061).
+
+> Про `SSL Method = Default`: значение по умолчанию у PJSIP — TLS 1.0, а
+> Android 15 не согласует 1.0/1.1 вообще. Телефон не подключится, поэтому
+> здесь нужно именно `tlsv1_2`.
+
+После Submit → **Apply Config** транспорт нужно **перезапустить целиком**:
+`fwconsole restart` (или `systemctl restart asterisk`). Модульный reload
+транспорты не перечитывает.
 
 В `/etc/asterisk/asterisk.conf`, секция `[options]`:
 

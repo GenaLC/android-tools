@@ -40,6 +40,51 @@
    телефона должен быть статическим и известным PBX: за CGNAT мобильного
    оператора он не подходит.
 
+## 0.1 Как это делается в GUI FreePBX 16.0.50
+
+Меню именно этой версии (Asterisk 18.26.4). Порядок — от расширения к
+маршрутам.
+
+**Шаг 1. Расширение шлюза.**
+`Applications → Extensions → Add Extension → Device` → Device Type: **SIP
+Phone**.
+
+| Поле | Значение |
+|---|---|
+| Extension Number | `1001` |
+| Display Name | GSM Gateway |
+| Secret | пароль шлюза (тот же, что в приложении) |
+| Advanced → Context | `from-gsm-gateway` |
+| Advanced → Transport | **UDP** (транспорт `0.0.0.0-udp`, порт 6064) |
+| Advanced → Outbound Proxy | пусто |
+| Advanced → Codecs | `g722`, `alaw`, `ulaw` (см. §6) |
+| Advanced → Direct Media | No |
+| Advanced → RTP Symmetric / Rewrite Contact | Yes |
+
+**Шаг 2. Dialplan.**
+`Administration → Config Edit` → слева **Asterisk Custom Configuration
+Files** → `extensions_custom.conf` → вставить блок из §4 → Save →
+**Apply Config**. FreePBX этот файл не перезаписывает, в отличие от
+`extensions.conf`.
+
+**Шаг 3. `identify` для входящих GSM.**
+`Administration → Config Edit` → **Asterisk Custom Configuration Files** →
+`pjsip.identify_custom_post.conf` → секция из §5 → Save → Apply Config.
+
+**Шаг 4. Исходящий маршрут.**
+`Connectivity → Outbound Routes → Add Outbound Route`:
+
+| Поле | Значение |
+|---|---|
+| Name | GSM через шлюз |
+| Dial Patterns → Match Pattern | `+X.` (или `00X.`, если агенты набирают международный через 00) |
+| Trunks | **SIP Phone → 1001** |
+| CallerID | номер SIM шлюза в E.164 |
+
+**Шаг 5. Проверка.**
+`Administration → Config Edit` → `pjsip.endpoint.conf` — там видно, что
+FreePBX собрал эндпоинт; `pjsip.registrations` — на сервере.
+
 ## 1. Что шлюз читает из INVITE
 
 Из нестандартных заголовков шлюз читает **ровно один**:
