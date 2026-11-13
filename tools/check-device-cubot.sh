@@ -23,6 +23,35 @@
 # Exit:   0 = a usable injection route was found
 #         1 = the phone cannot run the gateway (no telephony / no route)
 #         2 = the phone could not be checked (no root, device not reachable)
+#
+# ── What the script looks for, and why ──────────────────────────────────
+#
+# Uplink (agent → caller).  The agent's voice has to reach the modem's
+# uplink without going through the loudspeaker.  Two mechanisms exist on
+# MediaTek:
+#
+#   * incall_music — the audio policy declares a mixPort named
+#     incall_music_uplink carrying the flag AUDIO_OUTPUT_FLAG_INCALL_MUSIC,
+#     and a route mixes it into the devicePort "Telephony Tx"
+#     (AUDIO_DEVICE_OUT_TELEPHONY_TX).  Purely a policy path: no mixer
+#     control is involved, only the mutes below.
+#   * BGS — the HAL exposes Set_BGS_UL_Mute / Set_BGS_DL_Mute and the
+#     BGSoundOn / BGSoundConfig entry points (upstream's route).
+#
+# The policy names its ports with tagName="..." — an earlier version of this
+# script looked for name="..." only and reported a working uplink as missing.
+# Both spellings are accepted now.
+#
+# Downlink (caller → agent).  The caller's voice has to reach the app.  The
+# only digital path on MediaTek is AudioSource.VOICE_DOWNLINK, which the
+# framework exposes as a hidden field of AudioAttributes.  Android 15 refuses
+# that field for apps that target API 35, so this is the part of the gateway
+# that still needs a working answer on these phones.  A telephony capture PCM
+# (a tinycap target) would be an alternative; the script looks for one.
+#
+# The mixer on a modern MediaTek phone no longer carries BGS controls at all.
+# It carries Speech_UL_Mute / Speech_DL_Mute / Speech_Mic_Mute instead —
+# the renamed speech-call mutes.  Both generations are looked for.
 
 set -u
 SERIAL="${1:-}"
@@ -33,8 +62,17 @@ su_()  { "${ADB[@]}" shell "su -c '$1'" 2>/dev/null | tr -d '\r'; }
 have_root() { [ "$(su_ 'id -u')" = "0" ]; }
 
 POL=/vendor/etc/audio_policy_configuration.xml
+
 # Does the audio policy contain this (grep -E) pattern?  No root needed.
+# The pattern is passed without single quotes — they would break the
+# quoting of the shell command that runs on the phone.
 pol_has() { sh_ "grep -qE '$1' $POL && echo y" | grep -q y; }
+# The policy spells a port either name="..." (older AOSP) or tagName="..."
+# (what MediaTek ships).  Both count.
+pol_port() { pol_has "devicePort (name|tagName)=\"$1\""; }
+# The whole policy as one string, for parsing.
+pol_dump() { sh_ "cat $POL"; }
+
 # Path of a working tinymix, or empty.  The executable bit alone is not
 # enough: an overlay can put a wrong-ABI binary on the path.
 find_tinymix() {
@@ -47,11 +85,16 @@ pass=0; fail=0; unknown=0
 ok()  { echo "  [ok]      $1"; pass=$((pass+1)); }
 no()  { echo "  [MISSING] $1"; fail=$((fail+1)); }
 unk() { echo "  [?]       $1"; unknown=$((unknown+1)); }
+# A property that simply does not exist is a finding, not an unanswered
+# question: it says the build has no VoLTE at all.
+absent() { echo "  [--]      $1"; }
 
 # What was found, and what it means for the route.
 BGS_IN_HAL=0        # the vendor HAL carries the background-sound parameters
-CAPTURE_POLICY=0   # the audio policy has a Telephony Rx route (VOICE_DOWNLINK)
-CAPTURE_PCM=0      # a telephony capture PCM exists (tinycap over root)
+UPLINK_POLICY=0     # the policy mixes incall_music_uplink into Telephony Tx
+CAPTURE_POLICY=0    # the audio policy has a Telephony Rx route
+CAPTURE_PCM=0       # a telephony capture PCM exists (tinycap over root)
+SPEECH_MUTE=0       # the mixer can mute the handset's own speech path
 
 # The route the phone should use, decided from what was found.  Set below.
 ROUTE=""
@@ -98,31 +141,43 @@ fi
 # ── 2. audio policy (no root needed) — the decisive one ────────────────
 echo
 echo "=== 2. Audio policy: is there a route to the modem uplink? ==="
-if pol_has 'mixPort name="[^"]*incall[^"]*"'; then
+POLICY=$(pol_dump)
+
+if echo "$POLICY" | grep -qE 'mixPort name="[^"]*incall[^"]*"'; then
     ok "incall_music mixPort declared"
-    sh_ "grep -A4 'mixPort name=\"incall' $POL" | grep -iE 'channelmask|samplerate' | sed 's/^/            /'
+    echo "$POLICY" | grep -A4 'mixPort name="incall' | grep -iE 'channelmask|samplerate|flags' \
+        | sed 's/^/            /' | head -8
 else
     no "no incall_music mixPort — the incall_music route is not available"
 fi
 
-if pol_has 'devicePort name="Telephony Tx"'; then
-    ok "Telephony Tx devicePort declared"
+if pol_port "Telephony Tx"; then
+    ok "Telephony Tx devicePort declared (AUDIO_DEVICE_OUT_TELEPHONY_TX)"
 else
     no "no Telephony Tx devicePort — nothing is routed into the modem uplink"
 fi
 
-if pol_has 'sink="Telephony Tx"'; then
-    ok "some mixPort sinks into Telephony Tx"
-    sh_ "grep -B6 'sink=\"Telephony Tx\"' $POL" | grep -i 'mixPort name' | tail -2 | sed 's/^/            /'
+# The route that actually matters: does anything mix into Telephony Tx, and
+# is incall_music_uplink one of the sources?
+TX_ROUTE=$(echo "$POLICY" | tr '<' '\n' | grep 'route type="mix" sink="Telephony Tx"' | head -1)
+if [ -n "$TX_ROUTE" ]; then
+    ok "a route mixes into Telephony Tx"
+    echo "            $TX_ROUTE" | sed 's/^ *//' | tr -s ' ' | sed 's/^/            /'
+    if echo "$TX_ROUTE" | grep -q 'incall_music'; then
+        ok "incall_music_uplink is routed into Telephony Tx — the digital uplink exists"
+        UPLINK_POLICY=1
+    else
+        no "incall_music_uplink is NOT among the sources of Telephony Tx"
+    fi
 else
-    no "no mixPort sinks into Telephony Tx"
+    no "no route mixes into Telephony Tx"
 fi
 
-if pol_has 'devicePort name="Telephony Rx"'; then
+if pol_port "Telephony Rx"; then
     ok "Telephony Rx devicePort declared — VOICE_DOWNLINK has a route"
     CAPTURE_POLICY=1
 else
-    no "no Telephony Rx devicePort — VOICE_DOWNLINK may not carry the caller"
+    absent "no Telephony Rx devicePort — the downlink must come from AudioSource.VOICE_DOWNLINK"
 fi
 
 # ── 3. the audio HAL (root) ────────────────────────────────────────────
@@ -145,12 +200,21 @@ else
             no "no BGS parameters in the HAL — the background-sound route is gone"
             BGS_IN_HAL=0
         fi
-        echo "$S" | grep -q "Set_SpeechCall_UL_Mute" \
-            && ok "speech-call mutes in the HAL — the handset can be taken out of the call" \
-            || no "no speech-call mutes in the HAL"
-        echo "$S" | grep -qi "incall_music" \
-            && ok "incall_music in the HAL" \
-            || unk "no incall_music string in the HAL (the policy may still offer it)"
+        if echo "$S" | grep -qE "Set_SpeechCall_(UL|DL)_Mute"; then
+            ok "speech-call mutes in the HAL — the handset can be taken out of the call"
+        else
+            no "no speech-call mutes in the HAL"
+        fi
+        if echo "$S" | grep -qE "BGSound(On|Off|Config)"; then
+            ok "BGSound entry points in the HAL — the BGS player can be driven"
+        else
+            unk "no BGSound entry points in the HAL (the parameter route may still work)"
+        fi
+        if echo "$S" | grep -qi "incall"; then
+            ok "the HAL knows the incall state"
+        else
+            unk "no incall string in the HAL (the policy may still offer it)"
+        fi
     fi
 fi
 
@@ -162,38 +226,41 @@ if ! have_root; then
 else
     TM=$(find_tinymix)
     if [ -z "$TM" ]; then
-        unk "tinymix not present — push magisk/tinymix to /data/local/tmp/ (chmod 755)"
+        unk "tinymix not present — push magisk/tinymix to /data/local/tmp/ (chmod 755):"
+        echo "            adb push magisk/tinymix /data/local/tmp/tinymix && adb shell chmod 755 /data/local/tmp/tinymix"
     else
         ok "tinymix at $TM"
-        ABI=$(su_ "file $TM" | grep -oE 'aarch64|ARM|Intel 80386' | head -1)
         DABI=$(sh_ getprop ro.product.cpu.abi)
-        if [ -z "$ABI" ]; then
-            unk "could not read the tinymix ABI (no file(1) on the device) — device ABI is $DABI"
-        else
-            case "$ABI:$DABI" in
-                aarch64:*64*|*64*:aarch64) ok "tinymix ABI ($ABI) matches the device ($DABI)" ;;
-                *) no "tinymix ABI ($ABI) does not match the device ($DABI)" ;;
-            esac
-        fi
+        echo "            device ABI: $DABI"
         M=$(su_ "$TM")
-        echo "$M" | grep -qi 'bgs' \
-            && ok "BGS mixer controls present" \
-            || unk "no BGS mixer control (the HAL parameters may be the only route)"
-        echo "$M" | grep -qiE 'incall|inc_call' \
-            && ok "incall mixer controls present" \
-            || unk "no incall mixer control (the policy route may be the only one)"
+        NCTRL=$(echo "$M" | grep -c "^ *[0-9]")
+        echo "            $NCTRL mixer controls"
+        if echo "$M" | grep -qiE "bgs|background"; then
+            ok "BGS mixer controls present"
+            echo "$M" | grep -iE "bgs|background" | sed 's/^/            /' | head -6
+        else
+            absent "no BGS mixer control — the HAL parameters drive the BGS route here"
+        fi
+        if echo "$M" | grep -qiE "Speech_(UL|DL|Mic)_Mute|Set_SpeechCall"; then
+            ok "speech mutes in the mixer — the handset can be taken out of the call"
+            SPEECH_MUTE=1
+            echo "$M" | grep -iE "Speech_(UL|DL|Mic)_Mute" | sed 's/^/            /' | head -6
+        else
+            no "no speech mutes in the mixer"
+        fi
     fi
 
     PCMS=$(su_ 'cat /proc/asound/pcm 2>/dev/null')
     if [ -z "$PCMS" ]; then
         unk "no /proc/asound/pcm — cannot look for a telephony capture PCM"
     else
-        echo "$PCMS" | grep -iE 'tel|voice|incall|tdm|apd|smartphone' | sed 's/^/            /'
+        echo "            $(echo "$PCMS" | grep -c .) PCM devices"
+        echo "$PCMS" | grep -iE 'tel|voice|incall|tdm|apd|smartphone|hostless' | sed 's/^/            /' | head -12
         if echo "$PCMS" | grep -iE 'tel|voice|incall|tdm|apd|smartphone' | grep -q capture; then
             ok "a telephony capture PCM exists — tinycap can read the downlink"
             CAPTURE_PCM=1
         else
-            no "no telephony capture PCM — the caller can only be heard acoustically"
+            absent "no telephony capture PCM — the downlink must come from AudioSource.VOICE_DOWNLINK"
         fi
     fi
 fi
@@ -201,14 +268,19 @@ fi
 # ── 5. how the call is carried ─────────────────────────────────────────
 echo
 echo "=== 5. Call type: CS, IMS/VoLTE or WFC ==="
-for p in ims.mpsdn ims.mpsdn_enabled ims.ims_enabled ims.vowifi_enabled wfc.state volte.enabled volte.hw_enabled; do
-    V=$(sh_ getprop "$p")
+PROPS=$(sh_ getprop)
+FOUND=0
+for p in ims.mpsdn ims.mpsdn_enabled ims.ims_enabled ims.vowifi_enabled \
+         wfc.state volte.enabled volte.hw_enabled gsm.sim.state \
+         gsm.version.baseband vendor.radio.mtk.ims_start gsm.operator.alpha; do
+    V=$(echo "$PROPS" | sed -n "s/^\[$p\]: \[\(.*\)\]$/\1/p")
     if [ -n "$V" ]; then
         echo "  $p = $V"
+        FOUND=1
     fi
 done
-if [ -z "$(sh_ getprop ims.mpsdn_enabled)$(sh_ getprop ims.ims_enabled)$(sh_ getprop wfc.state)$(sh_ getprop volte.enabled)" ]; then
-    unk "no IMS/VoLTE/WFC properties readable — the carrier may be on plain CS"
+if [ "$FOUND" = "0" ]; then
+    absent "no IMS/VoLTE/WFC properties on this build — the carrier is most likely plain CS"
 fi
 cat <<'EOF'
   These properties only say what the modem supports, not what the *current*
@@ -225,12 +297,12 @@ echo
 echo "=== Verdict ==="
 
 # The injection route, in the order the app tries it.
-if [ "${BGS_IN_HAL:-0}" = "1" ]; then
+if [ "${UPLINK_POLICY:-0}" = "1" ]; then
+    ROUTE="incall_music"
+    ROUTE_WHY="the audio policy mixes incall_music_uplink into Telephony Tx"
+elif [ "${BGS_IN_HAL:-0}" = "1" ]; then
     ROUTE="BGS"
     ROUTE_WHY="the vendor audio HAL carries the background-sound parameters"
-elif pol_has 'mixPort name="[^"]*incall[^"]*"' && pol_has 'devicePort name="Telephony Tx"'; then
-    ROUTE="incall_music"
-    ROUTE_WHY="the audio policy offers an incall_music mixPort routed to Telephony Tx"
 else
     ROUTE="acoustic"
     ROUTE_WHY="no digital injection route was found"
@@ -251,16 +323,24 @@ if [ "$ROUTE" = "acoustic" ]; then
 fi
 
 if [ "$CAPTURE_POLICY" = "1" ]; then
-    CAPTURE="VOICE_DOWNLINK"
+    CAPTURE="VOICE_DOWNLINK via the audio policy"
 elif [ "$CAPTURE_PCM" = "1" ]; then
     CAPTURE="tinycap on the telephony-rx PCM"
 else
-    CAPTURE="acoustic (the microphone)"
+    CAPTURE="AudioSource.VOICE_DOWNLINK (framework path)"
 fi
 
 if [ "$unknown" -gt 0 ]; then
-    echo "  Usable, but $unknown checks could not be made: $ROUTE_WHY."
-    echo "  Root the phone and re-run for a definite answer."
+    echo "  USABLE (uplink): use the $ROUTE injection mode — $ROUTE_WHY."
+    echo "  The caller is captured from $CAPTURE."
+    if [ "$SPEECH_MUTE" = "1" ]; then
+        echo "  The handset can be muted out of the call (speech mutes present in the mixer)."
+    else
+        echo "  WARNING: no speech mutes found in the mixer — the handset's own voice"
+        echo "  may stay in the call."
+    fi
+    echo
+    echo "  $unknown checks could not be made — see the [?] lines above."
     exit 2
 fi
 
@@ -278,9 +358,10 @@ case "$ROUTE" in
 esac
 echo "  The caller is captured from $CAPTURE, never from VOICE_CALL: that one"
 echo "  mixes the uplink, which carries the agent's own voice, into the capture."
-if [ "$CAPTURE" = "acoustic (the microphone)" ]; then
-    echo "  WARNING: no digital downlink was found.  The caller will only be"
-    echo "  heard through the phone's own microphone, which needs the call on"
-    echo "  the loudspeaker and is prone to echo."
+if [ "$CAPTURE" = "AudioSource.VOICE_DOWNLINK (framework path)" ]; then
+    echo "  NOTE: the downlink comes from AudioSource.VOICE_DOWNLINK, which is"
+    echo "  set through the hidden AudioAttributes.mSource field.  Android 15"
+    echo "  refuses that field for apps that target API 35 — that is the one"
+    echo "  open question for these phones."
 fi
 exit 0
