@@ -46,7 +46,8 @@ PBX отправляет шлюзу INVITE на зарегистрированн
 наследуется — то есть заголовок до шлюза не доезжает. Работают два варианта:
 
 **Вариант A — наследуемый заголовок** (Asterisk **20.19+ / 22.9+ / 23.3+**,
-`res_pjsip_header_funcs`):
+`res_pjsip_header_funcs`). **На вашем сервере (Asterisk 18.26.4) этого варианта
+нет** — см. Вариант B ниже:
 
 ```ini
 [gsm-outbound]
@@ -75,21 +76,33 @@ PJSIP_INHERITABLE_HEADER` ничего не выводит, используйт
 [gsm-outbound]
 exten => _+X.,1,NoOp(GSM gateway: outbound to ${EXTEN})
  same => n,Set(GW_DEST=${EXTEN})
- same => n,Dial(PJSIP/1001,60,b(add-gsm-forward^s^1))
+ same => n,Dial(PJSIP/1001,60,b(add-gsm-forward^s^1^${EXTEN}))
  same => n,Hangup()
 
 ; В pre-dial-обработчике PJSIP_HEADER(add,...) работает с каналом
 ; ВЫЗЫВАЕМОГО — поэтому заголовок уезжает в INVITE, который уходит шлюзу.
+; Номер передан аргументом (после третьего ^), а не переменной: аргумент
+; доезжает наверняка, а наследование переменных вызывающего канала
+; зависит от того, как Dial() создал вызываемый канал.
 [add-gsm-forward]
-exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${GW_DEST})
+exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
  same => n,Return()
 ```
 
-Проверить, что нужная функция есть:
+Формат опции `b()`: `b(контекст^экстеншн^приоритет^аргумент1^аргумент2…)`.
+Аргументы приходят в обработчик как `${1}`, `${2}` и так далее.
+
+**Ваш сервер — Asterisk 18.26.4** (проверено на freepbx-c): функции
+`PJSIP_INHERITABLE_HEADER` в ветке 18 нет, она появилась в 20.19.0, 22.9.0 и
+23.3.0. Поэтому на вашем сервере применяется **Вариант B**. Убедиться можно
+одной командой:
 
 ```bash
 asterisk -rx "core show function PJSIP_INHERITABLE_HEADER"
 ```
+
+Если она ответит «No such function» — Вариант A невозможен, это не ошибка
+конфигурации, а версия Asterisk.
 
 ### 2.2 GSM → PBX (абонент звонит на SIM, шлюз звонит в PBX)
 
@@ -256,14 +269,16 @@ Context, или Config Edit → `extensions_custom.conf`).
 
 ; ── Исходящий: агент звонит абоненту через сотовную ногу шлюза ──
 ; Контексты и приложения — см. §2.1.
+; Вариант B: pre-dial-обработчик (на Asterisk 18 функции
+; PJSIP_INHERITABLE_HEADER нет).
 [gsm-outbound]
 exten => _+X.,1,NoOp(GSM gateway: outbound to ${EXTEN})
  same => n,Set(GW_DEST=${EXTEN})
- same => n,Dial(PJSIP/1001,60,b(add-gsm-forward^s^1))
+ same => n,Dial(PJSIP/1001,60,b(add-gsm-forward^s^1^${EXTEN}))
  same => n,Hangup()
 
 [add-gsm-forward]
-exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${GW_DEST})
+exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
  same => n,Return()
 
 ; ── Входящий: абонент звонит на SIM, шлюз звонит в PBX ──
