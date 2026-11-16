@@ -167,6 +167,14 @@ build_apk() {
     echo ""
     echo "=== Building $BUILD_TYPE APK ==="
     echo ""
+    # The incremental dexer leaves a stale "<class> 2.dex" behind when a
+    # class is renamed or its companion changes shape, and the merge then
+    # fails with "Type ... is defined multiple times".  The same thing
+    # happens to the test reports, where a stale "X 2.xml" makes a test
+    # that has been fixed look like it is still failing.  Clearing both
+    # costs a few seconds and makes the build reproducible.
+    rm -rf app/build/intermediates/project_dex_archive app/build/intermediates/dex 2>/dev/null || true
+    rm -rf app/build/test-results 2>/dev/null || true
     if [ "$BUILD_TYPE" = "release" ]; then
         ./gradlew assembleRelease --no-daemon
         # Signed via the "shared" signingConfig, so the output is

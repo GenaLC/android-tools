@@ -413,10 +413,18 @@ object SipBuilder {
         callerIdNumber: String? = null,
         callerIdName: String? = null,
         auth: String? = null,
-        srtp: SrtpKeys? = null
+        srtp: SrtpKeys? = null,
+        fromHeader: String? = null,
+        assertedIdentity: String? = null,
+        assertedIdentityName: String? = null,
     ): String {
-        val fromDisplay = if (callerIdName != null) "\"$callerIdName\" " else ""
-        val fromUser = callerIdNumber ?: username
+        val asserting = assertedIdentity != null
+        // While an identity is asserted, the gateway is the caller: the From
+        // carries the account name, and the number that is really on the line
+        // is stated in P-Asserted-Identity.  Putting the number in From would
+        // leave the server with no extension to match the request against.
+        val fromDisplay = if (!asserting && callerIdName != null) "\"$callerIdName\" " else ""
+        val fromUser = if (asserting) username else (callerIdNumber ?: username)
         val sdp = buildSdp(localIp, localRtpPort, srtp)
         return buildString {
             append("INVITE $targetUri SIP/2.0\r\n")
@@ -424,10 +432,21 @@ object SipBuilder {
             append("Max-Forwards: 70\r\n")
             append("User-Agent: $userAgent\r\n")
             append("To: <$targetUri>\r\n")
-            append("From: $fromDisplay<sip:$fromUser@$domain>;tag=$fromTag\r\n")
+            // The From header is passed in whole when the caller has a From
+            // of its own — the authenticated re-INVITE has to carry exactly
+            // the same From, tag included, or the dialog breaks.
+            append("From: ${fromHeader ?: "$fromDisplay<sip:$fromUser@$domain>;tag=$fromTag"}\r\n")
             append("Call-ID: $callId\r\n")
             append("CSeq: $cseq INVITE\r\n")
             append("Contact: <sip:$username@$localIp:$localPort$contactParam>\r\n")
+            // The asserted identity is the caller's number, stated by the
+            // gateway on behalf of the GSM leg.  It is what lets the server
+            // tell who is on the line while the gateway itself identifies as
+            // its own account — see MediaTekProfiler / the gateway contract.
+            if (assertedIdentity != null) {
+                val paiDisplay = if (assertedIdentityName != null) "\"$assertedIdentityName\" " else ""
+                append("P-Asserted-Identity: $paiDisplay<sip:$assertedIdentity@$domain>\r\n")
+            }
             if (auth != null) append(auth)
             append("Content-Type: application/sdp\r\n")
             append("Content-Length: ${sdp.length}\r\n\r\n")

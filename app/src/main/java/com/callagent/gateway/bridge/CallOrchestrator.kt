@@ -902,7 +902,13 @@ class CallOrchestrator(
             targetExtension = inboundSipDestination(gsmCall),
             localRtpPort = rtpPort,
             callerIdNumber = callerNumber,
-            callerIdName = callerName
+            callerIdName = callerName,
+            // The gateway states who is on the line, and identifies itself as
+            // its own account.  The server then matches the request to the
+            // gateway's extension by that name — from any address, so the
+            // phone needs no static IP and the server needs no identify
+            // section.  The caller's number is in P-Asserted-Identity.
+            assertedIdentity = callerNumber,
         )
         sipCall.listener = this
         activeSipCall = sipCall

@@ -100,6 +100,19 @@ class SipCall(
     var outboundCallerIdNumber: String? = null
     var outboundCallerIdName: String? = null
 
+    /**
+     * The number the gateway asserts on behalf of the GSM leg, and the name
+     * that goes with it.
+     *
+     * While this is set, the gateway identifies itself to the server as its
+     * own account (the user in From) and states the caller's number in
+     * P-Asserted-Identity.  That is what lets the server match the request
+     * to the endpoint by name — from any address, with no identify section
+     * and no static IP on either side.
+     */
+    var assertedIdentity: String? = null
+    var assertedIdentityName: String? = null
+
     // GSM forward target (for outbound from server)
     var gsmForwardNumber: String? = null
 

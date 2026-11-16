@@ -539,20 +539,41 @@ class SipClient(
 
     // ── Outbound INVITE ─────────────────────────────────
 
-    /** Place an outbound SIP call (gateway → Asterisk) */
+    /**
+     * Place an outbound SIP call (gateway → Asterisk)
+     *
+     * [assertedIdentity] is the number the gateway states on behalf of the
+     * GSM leg.  When it is given, the gateway identifies itself as its own
+     * account — the user in From is the account name, not the caller's
+     * number — and the caller's number travels in P-Asserted-Identity.
+     *
+     * Why: the server matches an incoming request to an endpoint by the user
+     * in the From header.  With the caller's number in From, nothing matches
+     * — the number is not an extension — and the request has to be matched by
+     * its source address, which means an identify section with a literal
+     * address and a static IP on the phone.  With the account name in From,
+     * the match works from any address, which is what a phone behind a
+     * mobile carrier's NAT needs.  The caller's number is not lost: it is in
+     * P-Asserted-Identity, and the server takes it from there when the
+     * endpoint trusts inbound identities (trust_id_inbound=yes).
+     */
     fun makeCall(
         targetExtension: String,
         localRtpPort: Int,
         callerIdNumber: String? = null,
-        callerIdName: String? = null
+        callerIdName: String? = null,
+        assertedIdentity: String? = null,
     ): SipCall {
         val callId = "${System.currentTimeMillis()}call@$publicIp"
         val call = SipCall(callId, SipCall.Direction.OUTBOUND, this)
         call.localRtpPort = localRtpPort
         call.outboundCallerIdNumber = callerIdNumber
         call.outboundCallerIdName = callerIdName
-        val fromUser = callerIdNumber ?: username
-        val fromDisplay = if (callerIdName != null) "\"$callerIdName\" " else ""
+        call.assertedIdentity = assertedIdentity
+        call.assertedIdentityName = if (assertedIdentity != null) callerIdName else null
+        val asserting = assertedIdentity != null
+        val fromUser = if (asserting) username else (callerIdNumber ?: username)
+        val fromDisplay = if (!asserting && callerIdName != null) "\"$callerIdName\" " else ""
         call.fromHeader = "$fromDisplay<sip:$fromUser@$serverDomain>;tag=${call.localTag}"
         call.toHeader = "<sip:$targetExtension@$serverDomain>"
 
@@ -568,8 +589,13 @@ class SipClient(
             callId, call.localCseq++,
             localRtpPort,
             fromTag = call.localTag,
-            callerIdNumber = callerIdNumber,
-            callerIdName = callerIdName,
+            // The From is passed in whole, so that the authenticated
+            // re-INVITE can repeat it exactly — same user, same tag.
+            fromHeader = call.fromHeader,
+            callerIdNumber = if (asserting) null else callerIdNumber,
+            callerIdName = if (asserting) null else callerIdName,
+            assertedIdentity = assertedIdentity,
+            assertedIdentityName = call.assertedIdentityName,
             srtp = call.localSrtpKeys
         )
         // Keep the exact INVITE transaction headers.  If the GSM caller
@@ -718,8 +744,14 @@ class SipClient(
             call.callId, call.localCseq++,
             call.localRtpPort,
             fromTag = call.localTag,
-            callerIdNumber = call.outboundCallerIdNumber,
-            callerIdName = call.outboundCallerIdName,
+            // The same From, tag included, and the same asserted identity:
+            // the re-INVITE is the same request with credentials on it, and
+            // the server matches it to the same endpoint.
+            fromHeader = call.fromHeader,
+            callerIdNumber = if (call.assertedIdentity != null) null else call.outboundCallerIdNumber,
+            callerIdName = if (call.assertedIdentity != null) null else call.outboundCallerIdName,
+            assertedIdentity = call.assertedIdentity,
+            assertedIdentityName = call.assertedIdentityName,
             auth = auth,
             srtp = call.localSrtpKeys
         )
