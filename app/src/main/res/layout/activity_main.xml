@@ -705,6 +705,14 @@
                             android:layout_marginTop="16dp" />
 
                         <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Only for TLS connections. With TLS switched off this is not needed — plain SIP over UDP has no certificate at all."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="4dp" />
+
+                        <TextView
                             android:id="@+id/tvCfgCaStatus"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
