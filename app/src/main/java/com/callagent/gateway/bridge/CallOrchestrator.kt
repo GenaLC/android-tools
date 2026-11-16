@@ -528,43 +528,25 @@ class CallOrchestrator(
     /**
      * The number an INVITE asks us to dial.
      *
-     * X-GSM-Forward first, then the user part of the Request-URI — the same
-     * order the SMS path resolves a recipient in, so that
-     * Dial(SIP/<peer>/+49...) addresses a call the way it already addresses a
-     * message, and a dialplan does not have to know that calls are the
-     * exception.
-     *
-     * The Request-URI carries the account name whenever the server addresses
-     * the peer rather than a number, and our own MSISDN when it routes the
-     * SIM's DID back to us.  Dialling either would be a loop, so both are
-     * ruled out before what is left is treated as a destination.
+     * The rules live in [CallDestination] so they can be tested without a
+     * phone: X-GSM-Forward first, then the Request-URI, then the To header —
+     * res_pjsip builds the Request-URI from the endpoint's AOR and puts the
+     * dialled part into the To header, so which of the two carries the number
+     * depends on the dial string the server used.
      */
     private fun outboundDestination(call: SipCall): String? {
-        call.gsmForwardNumber?.trim()?.ifEmpty { null }?.let { return it }
-
         val invite = call.originalInvite ?: return null
-        val user = invite.requestUri
-            ?.let { invite.extractUser(it) }
-            ?.trim()?.ifEmpty { null } ?: return null
-
-        if (user.equals(sipClient.username, ignoreCase = true)) return null
-        if (digitsOf(user) == digitsOf(inboundSipDestination())) return null
-        if (!looksDialable(user)) return null
-
-        Log.i(TAG, "No X-GSM-Forward — destination taken from the Request-URI")
-        return user
+        val resolved = CallDestination.resolve(
+            xGsmForward = call.gsmForwardNumber,
+            requestUri = invite.requestUri,
+            toHeader = invite.to,
+            accountName = sipClient.username,
+            ownNumbers = listOf(inboundSipDestination()),
+        )
+        if (resolved == null) return null
+        Log.i(TAG, "GSM destination resolved: $resolved")
+        return resolved
     }
-
-    /**
-     * Strict on purpose: a Request-URI user is a number only when that is all
-     * it is.  An account name made of digits is already ruled out above; one
-     * with a letter in it was never a number to begin with.
-     */
-    private fun looksDialable(user: String): Boolean =
-        user.all { it.isDigit() || it in "+-.()" } &&
-            digitsOf(user).length >= MIN_DIALABLE_DIGITS
-
-    private fun digitsOf(value: String): String = value.filter { it.isDigit() }
 
     /** Handles termination from both SipClient.Listener and SipCall.Listener */
     override fun onCallTerminated(call: SipCall) {
@@ -1293,8 +1275,5 @@ class CallOrchestrator(
 
         /** Placeholder shown in settings until a real MSISDN is entered. */
         private const val DEFAULT_OWN_NUMBER = "+49123123123123"
-
-        /** Shortest Request-URI user we will believe is a number to dial. */
-        private const val MIN_DIALABLE_DIGITS = 3
     }
 }
