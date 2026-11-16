@@ -69,6 +69,12 @@ Phone**.
 | Advanced → Codecs | `g722`, `alaw`, `ulaw` (см. §6) |
 | Advanced → Direct Media | No |
 | Advanced → RTP Symmetric / Rewrite Contact | Yes |
+| Advanced → **Trust RPID** | **Yes** |
+
+> Про «Trust RPID»: подпись в GUI старая, это опция `trust_id_inbound`
+> из res_pjsip — «принимать идентификацию, присланную устройством». Ровно
+> она нужна, чтобы номер GSM-вызывающего из `P-Asserted-Identity` стал
+> CallerID'ом, а не именем учётной записи шлюза (1001).
 
 **Шаг 2. Dialplan.**
 `Administration → Config Edit` → слева **Asterisk Custom Configuration
@@ -76,9 +82,25 @@ Files** → `extensions_custom.conf` → вставить блок из §4 → 
 **Apply Config**. FreePBX этот файл не перезаписывает, в отличие от
 `extensions.conf`.
 
-**Шаг 3. `identify` для входящих GSM.**
-`Administration → Config Edit` → **Asterisk Custom Configuration Files** →
-`pjsip.identify_custom_post.conf` → секция из §5 → Save → Apply Config.
+**Шаг 3. Передача PAI дальше, к 40181.**
+В форме расширения SIP Phone в FreePBX 16 опции `send_pai` нет — там только
+«Trust RPID». Чтобы номер вызывающего доехал до софтфона 40181, допишите её
+в `Administration → Config Edit` → **Asterisk Custom Configuration Files** →
+`pjsip.endpoint_custom_post.conf`:
+
+```ini
+[40181](+)
+send_pai=yes
+```
+
+`(+)` — это синтаксис sorcery «дописать в уже созданную секцию», а не
+создать новую: FreePBX собрал секцию сам, вы добавляете в неё одну строку.
+Save → Apply Config.
+
+**Шаг 3.1. `identify` для входящих GSM — не требуется.**
+Шлюз представляется именем аккаунта в `From` (§2.3), поэтому PBX находит его
+по имени, а не по адресу. Если секцию `identify` всё же создадите, `match`
+должен быть точным адресом, иначе она будет мешать.
 
 **Шаг 4. Исходящий маршрут.**
 `Connectivity → Outbound Routes → Add Outbound Route`:
@@ -329,10 +351,15 @@ allow=!all,g722,alaw,ulaw
 auth=auth1001
 aors=1001
 callerid=GSM Gateway
-; Шлюз пишет номер GSM-вызывающего в From (свой P-Asserted-Identity он не
-; шлёт).  Без доверия к идентификации PBX покажет вместо номера вызывающего
-; либо "Unknown", либо CallerID самого эндпоинта.
+; Шлюз представляется именем аккаунта в From, а номер GSM-вызывающего
+; присылает в P-Asserted-Identity (§2.3).  Без доверия к идентификации PBX
+; покажет вместо номера вызывающего CallerID самого эндпоинта ("1001").
+; В GUI FreePBX 16 это чекбокс Advanced → "Trust RPID".
 trust_id_inbound=yes
+; Передать P-Asserted-Identity дальше, тем, кому PBX звонит.  На эндпоинте
+; шлюза это не нужно (он ничего не принимает), а на эндпоинте получателя
+; (40181) — нужно, иначе софтфон покажет "1001".  В форме расширения этой
+; опции нет, её дописывают в pjsip.endpoint_custom_post.conf.
 send_pai=yes
 ; Не отвечать 180 раньше времени: шлюз сам сообщает 180, когда пошла
 ; сотовная нога.
