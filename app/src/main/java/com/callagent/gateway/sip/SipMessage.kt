@@ -334,7 +334,7 @@ object SipBuilder {
      * startup so the configured server domain can be included.
      */
     @Volatile
-    var userAgent: String = "gsm2sip"
+    var userAgent: String = "devicetools"
 
     /**
      * Which codecs to offer and accept: "g722", "g711" or "both".

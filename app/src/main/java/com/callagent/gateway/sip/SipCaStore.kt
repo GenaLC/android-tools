@@ -56,7 +56,7 @@ class FileCaStorage(private val file: File) : CaStorage {
  */
 object SipCaStore {
 
-    private const val DIR = "gsm2sip-tls"
+    private const val DIR = "devicetools-tls"
     private const val FILE = "ca.pem"
 
     fun storage(context: Context): CaStorage =
