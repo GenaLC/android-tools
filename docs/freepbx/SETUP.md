@@ -109,6 +109,35 @@ exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
 
 ## 4. Исходящий маршрут (агент → абонент через SIM)
 
+### Сначала: чем является `1001`
+
+На сервере `1001` — это **PJSIP-эндпоинт**, созданный через
+`Administration → Endpoints` (или вручную), а **не** расширение FreePBX и
+**не** транк. Признаки: в `/etc/asterisk/extensions.conf` нет секции
+`[ext-1001]`, а у эндпоинта пустые `mailboxes`, `named_call_group`,
+`pickup_group`, `voicemail_extension`.
+
+Отсюда важное следствие:
+
+- **В «Trunk Sequence for Matched Routes» SIP-эндпоинт поставить нельзя** —
+  этот список собирается из транков (модуль Trunks). Расширения и «голые»
+  эндпоинты доступны только в списке назначений (например, «Optional
+  Destination on Congestion»), который срабатывает только если все транки
+  отказали. Как основной путь он не годится.
+- **Для направления GSM → PBX эндпоинта `1001` достаточно как есть.** Шлюз
+  шлёт INVITE с `From: <sip:1001@pbx>`, res_pjsip находит эндпоинт по имени
+  (`identify_by=username,ip`, username — первый) и отдаёт запрос в его
+  контекст `from-gsm-gateway`.
+- **Для направления PBX → GSM нужен транк** — и транку нужен адрес шлюза,
+  доступный с сервера. За CGNAT мобильного оператора такого адреса нет
+  (см. §7): сначала белый IP или туннель, потом транк.
+
+Пометка «Note: Extension Routes is not registered» под полем Trunk Sequence
+к нашему эндпоинту отношения не имеет: это про платный модуль FreePBX
+«Extension Routing», не зарегистрированный на Sangoma. Игнорировать.
+
+### Маршрут (когда появится транк)
+
 `Connectivity → Outbound Routes → Add Outbound Route`.
 
 **Вкладка Route Settings:**
@@ -116,7 +145,7 @@ exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
 | Поле | Значение | Зачем |
 |---|---|---|
 | Name | `GSM via gateway` | имя маршрута в списке |
-| Trunk Sequence | `SIP Phone → 1001` | куда звонить: зарегистрированный шлюз |
+| Trunk Sequence | `gsm-gateway` (транк) | куда звонить |
 | **Route CID** | **`<SIM>`** (номер SIM в E.164) | CallerID, который уйдёт к шлюзу: по нему шлюз выбирает SIM и ставит его номер в сторону PSTN |
 | **Override Extension** | **Yes** | чтобы Route CID был важнее, чем Outbound CID расширения |
 | Route Type | **Permanent** (по умолчанию) | не Intra-Company — иначе PBX сохранит внутренний CallerID и не поставит номер SIM |
@@ -238,9 +267,38 @@ tail -f /var/log/asterisk/full
 
 ## 7. Что пока не закрыто
 
-- **PBX → GSM из интернета.** PBX шлёт INVITE на адрес из `Contact` — то
-  есть на публичный адрес телефона. Мобильные операторы входящие UDP-пакеты
-  за CGNAT обычно не заворачивают. Нужен белый IP (свой или Wi-Fi с белым
-  IP) либо туннель с обратным (WireGuard, Tailscale).
+- **PBX → GSM из интернета.** Для исходящего маршрута нужен транк, а транку
+  нужен адрес шлюза, доступный с сервера. За CGNAT мобильного оператора
+  публичного адреса нет: нужен белый IP (свой или Wi-Fi с белым IP) либо
+  туннель с обратным входом (WireGuard, Tailscale). После этого:
+
+  `Connectivity → Trunks → Add Trunk → Add SIP (chan_pjsip) Trunk`
+
+  | Вкладка | Поле | Значение |
+  |---|---|---|
+  | General | Trunk Name | `gsm-gateway` |
+  | General | Outbound CallerID | `<SIM>` |
+  | General | Maximum Channels | 1 |
+  | pjsip Settings → General | Username | `1001` |
+  | pjsip Settings → General | Auth username | `1001` |
+  | pjsip Settings → General | Secret | `<ПАРОЛЬ>` |
+  | pjsip Settings → General | SIP Server | `<адрес шлюза>` (белый IP или адрес в туннеле) |
+  | pjsip Settings → General | SIP Server Port | `6064` |
+  | pjsip Settings → General | Authentication | Outbound |
+  | pjsip Settings → General | Registration | None |
+  | pjsip Settings → General | Context | `from-internal` |
+  | pjsip Settings → Advanced | From User | `1001` |
+  | pjsip Settings → Advanced | Codecs | `ulaw`, `alaw` |
+  | pjsip Settings → Advanced | Trust RPID | Yes |
+  | pjsip Settings → Advanced | Send RPID | Send P-Asserted-Identity header |
+
+  В исходящем маршруте Trunk Sequence = `gsm-gateway`.
+
+  Внимание: у транка FreePBX сам создаёт `identify` с `match=<адрес шлюза>`.
+  Если адрес шлюза совпадёт с адресом, с которого приходят его собственные
+  INVITE, входящий звонок с SIM попадёт в контекст транка, а не в
+  `from-gsm-gateway`. Лечится либо контекстом транка `from-gsm-gateway`,
+  либо Inbound Route на DID = номер SIM.
+
 - **Номер SIM в SIM-карте.** Пока SIM не вставлена, приложение не знает
   номера — задайте его вручную в настройках.
