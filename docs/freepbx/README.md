@@ -120,9 +120,11 @@ GSM-вызывающего.
 | Поле | Значение |
 |---|---|
 | Name | GSM через шлюз |
+| Route Settings → Route CID | номер SIM шлюза в E.164 |
+| Route Settings → Override Extension | Yes |
 | Dial Patterns → Match Pattern | `+X.` (или `00X.`, если агенты набирают международный через 00) |
+| Dial Patterns → CallerID | **пусто** (это фильтр, а не «куда передать номер») |
 | Trunks | **SIP Phone → 1001** |
-| CallerID | номер SIM шлюза в E.164 |
 
 **Шаг 5. Проверка.**
 `Administration → Config Edit` → `pjsip.endpoint.conf` — там видно, что
@@ -497,8 +499,15 @@ exten => _+X.,1,NoOp(GSM gateway: inbound from ${CALLERID(num)})
 - на двухсимочном шлюзе не найдётся SIM под такой номер → `503 No Matching SIM`;
 - в PSTN абонент увидит номер `40181` вместо номера SIM.
 
-Поэтому в Outbound Route / в `Set(CALLERID(num))=…)` нужно поставить номер SIM
+Поэтому в Outbound Route (Route Settings → **Route CID**, Override Extension =
+Yes) / в `Set(CALLERID(num))=…)` нужно поставить номер SIM
 того же шлюза, на котором работает расширение `1001`.
+
+Не путайте это с полем **Dial Patterns → CallerID**: оно не «передаёт номер
+дальше», а **фильтрует**, какие вызывающие могут уйти по этому маршруту (для
+внутренних вызовов сравнивается номер расширения, а не его Outbound CID).
+Если вписать туда номер SIM, маршрут не сработает никогда: звонит `40181`, а
+фильтр ждёт `+49…`.
 
 Чтобы этот номер доехал до шлюза в заголовке, у эндпоинта `1001` должно стоять
 **Advanced → Send RPID = Send P-Asserted-Identity header** (`send_pai=yes`).

@@ -111,17 +111,45 @@ exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
 
 `Connectivity → Outbound Routes → Add Outbound Route`.
 
-| Поле | Значение |
-|---|---|
-| Name | `GSM via gateway` |
-| Trunk Sequence | `SIP Phone → 1001` |
-| Dial Patterns → Match Pattern | `+X.` |
-| Dial Patterns → CallerID | `<SIM>` (номер SIM в E.164) |
+**Вкладка Route Settings:**
 
-**CallerID маршрута = номер SIM.** По нему шлюз выбирает SIM (на
-двухсимочном — по номеру слотa) и ставит его номер в сторону PSTN. Если
-оставить CallerID `40181`, будет `503 No Matching SIM`, а абонент увидит
-«40181» вместо номера SIM.
+| Поле | Значение | Зачем |
+|---|---|---|
+| Name | `GSM via gateway` | имя маршрута в списке |
+| Trunk Sequence | `SIP Phone → 1001` | куда звонить: зарегистрированный шлюз |
+| **Route CID** | **`<SIM>`** (номер SIM в E.164) | CallerID, который уйдёт к шлюзу: по нему шлюз выбирает SIM и ставит его номер в сторону PSTN |
+| **Override Extension** | **Yes** | чтобы Route CID был важнее, чем Outbound CID расширения |
+| Route Type | **Permanent** (по умолчанию) | не Intra-Company — иначе PBX сохранит внутренний CallerID и не поставит номер SIM |
+| Route Password | пусто | — |
+
+**Вкладка Dial Patterns:**
+
+| Поле | Значение | Зачем |
+|---|---|---|
+| Prepend | пусто | — |
+| Prefix | пусто | — |
+| Match Pattern | `+X.` | международный номер абонента |
+| **CallerID** | **пусто** | это **фильтр**, а не «куда передать номер» |
+
+### CallerID в Dial Patterns — это фильтр
+
+Два разных поля называются похоже, но работают противоположно:
+
+| Поле | Смысл | Что писать нам |
+|---|---|---|
+| Dial Patterns → **CallerID** | **фильтр**: набранный номер подходит под Match Pattern только если CallerID вызывающего совпадает с этим полем. Для внутренних вызовов сравнивается **номер расширения** вызывающего, а не его Outbound CID | **пусто** — иначе маршрут не сработает никогда (звонит `40181`, а в поле стоит номер SIM) |
+| Route Settings → **Route CID** | **CallerID, который уходит в линию**: номер, который увидит шлюз (и потом абонент в PSTN) | **`<SIM>`**, Override Extension = Yes |
+
+Если номер SIM стоял в CallerID dial pattern'а, FreePBX не нашёл бы
+подходящего маршрута: звонящий transmits «40181», а фильтр ждал «+49…».
+Это тот самый случай «no route matches / все линии заняты».
+
+Иерархия CallerID в FreePBX (от высшей к низшей):
+
+1. Route CID при Override Extension = Yes
+2. Outbound CID расширения
+3. Route CID при Override Extension = No
+4. CallerID транка
 
 ### Проверьте, что сгенерировал FreePBX
 
