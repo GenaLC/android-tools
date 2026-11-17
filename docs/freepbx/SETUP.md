@@ -1,7 +1,7 @@
 # Настройка FreePBX под GSM-шлюз — что и куда вписать
 
 Пошаговая инструкция для вашей связки: **FreePBX 16.0.50 / Asterisk 18.26.4,
-сервер `159.100.13.216`, транспорт UDP, порт 6064**.
+сервер `185.82.73.76`, транспорт UDP, порт 6064**.
 
 Обозначения, которые надо заменить на свои:
 
@@ -128,15 +128,63 @@ exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
   шлёт INVITE с `From: <sip:1001@pbx>`, res_pjsip находит эндпоинт по имени
   (`identify_by=username,ip`, username — первый) и отдаёт запрос в его
   контекст `from-gsm-gateway`.
-- **Для направления PBX → GSM нужен транк** — и транку нужен адрес шлюза,
-  доступный с сервера. За CGNAT мобильного оператора такого адреса нет
-  (см. §7): сначала белый IP или туннель, потом транк.
+- **Для направления PBX → GSM нужен транк** — но не обязательно «SIP-транк с
+  адресом шлюза», см. ниже.
 
 Пометка «Note: Extension Routes is not registered» под полем Trunk Sequence
 к нашему эндпоинту отношения не имеет: это про платный модуль FreePBX
 «Extension Routing», не зарегистрированный на Sangoma. Игнорировать.
 
-### Маршрут (когда появится транк)
+### Ответ: да, маршрут через сам SIP 1001 сделать можно
+
+Вопрос «можно ли перенаправить звонок через SIP, указанный в маршруте» —
+**да**. Нужен **Custom Trunk** (Asterisk Custom Configuration), у которого
+диал-строка обращается прямо к эндпоинту `1001`:
+
+```ini
+PJSIP/1001/$OUTNUM$
+```
+
+Почему это работает без адреса шлюза: `PJSIP/1001` заставляет res_pjsip
+взять **AOR-контакт эндпоинта `1001`**, а он у нас есть — телефон
+зарегистрировался, и контакт живой (`Avail`). То есть Asterisk отправляет
+INVITE ровно туда, куда телефон сам себя заявил, — на тот адрес и порт, что
+в его `Contact`. Никакого «статического IP шлюза» в конфигурации транка
+указывать не нужно, и он не нужен: адрес берётся из регистрации.
+
+Это ключевое отличие от «SIP-транка с адресом шлюза» (§7): адрес шлюза там
+задавался бы руками и должен был бы совпадать с тем, что телефон реально
+показывает в `Contact`. Custom Trunk от этой ошибки страхует — он всегда
+идёт по живому контакту.
+
+Формат `$OUTNUM$` — стандартный для FreePBX: это номер, набранный
+абонентом, после применения правил Dialed Number Manipulation (то есть
+после Prefix/Prepend из Dial Patterns маршрута).
+
+### Шаг 1. Создать Custom Trunk
+
+`Connectivity → Trunks → Add Trunk → Add Custom Trunk`.
+
+**Вкладка General:**
+
+| Поле | Значение | Зачем |
+|---|---|---|
+| Trunk Name | `gsm-gateway` | имя транка в списке |
+| Outbound CallerID | `<SIM>` (номер SIM в E.164) | CallerID по умолчанию, если Route CID не сработает |
+| Maximum Channels | `1` | одна сотовная нога — больше некуда звонить |
+
+**Вкладка custom Settings:**
+
+| Поле | Значение |
+|---|---|
+| Custom Dial String | `PJSIP/1001/$OUTNUM$` |
+
+**Submit → Apply Config.**
+
+> Название вкладки в FreePBX 16 — «custom Settings» (с маленькой буквы),
+> поле — «Custom Dial String».
+
+### Шаг 2. Маршрут
 
 `Connectivity → Outbound Routes → Add Outbound Route`.
 
@@ -145,7 +193,7 @@ exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
 | Поле | Значение | Зачем |
 |---|---|---|
 | Name | `GSM via gateway` | имя маршрута в списке |
-| Trunk Sequence | `gsm-gateway` (транк) | куда звонить |
+| Trunk Sequence | `gsm-gateway` (созданный Custom Trunk) | куда звонить |
 | **Route CID** | **`<SIM>`** (номер SIM в E.164) | CallerID, который уйдёт к шлюзу: по нему шлюз выбирает SIM и ставит его номер в сторону PSTN |
 | **Override Extension** | **Yes** | чтобы Route CID был важнее, чем Outbound CID расширения |
 | Route Type | **Permanent** (по умолчанию) | не Intra-Company — иначе PBX сохранит внутренний CallerID и не поставит номер SIM |
@@ -159,6 +207,8 @@ exten => s,1,Set(PJSIP_HEADER(add,X-GSM-Forward)=${1})
 | Prefix | пусто | — |
 | Match Pattern | `+X.` | международный номер абонента |
 | **CallerID** | **пусто** | это **фильтр**, а не «куда передать номер» |
+
+**Submit → Apply Config** (кнопка вверху справа, оранжевая).
 
 ### CallerID в Dial Patterns — это фильтр
 
@@ -189,18 +239,22 @@ grep -n "1001" /etc/asterisk/extensions.conf | head -20
 ```
 
 Нужна строка с `Dial(PJSIP/1001/…)` — то есть с «дозвонной частью» в
-диал-строке. Если её нет и получилось `Dial(PJSIP/1001)` без номера, то
-FreePBX номер в INVITE не положил, и нужно одно из двух:
+диал-строке. Custom Trunk с диал-строкой `PJSIP/1001/$OUTNUM$` даёт именно
+такую строку, потому что FreePBX подставляет `$OUTNUM$` на этапе генерации.
 
-1. **Вариант с заголовком** — в `extensions_custom.conf` заменить строку
-   `Dial(PJSIP/1001/${EXTEN},60)` на
-   `Dial(PJSIP/1001,60,b(add-gsm-forward^s^1(${EXTEN})))`.
-   Заголовок `X-GSM-Forward` добавляется уже на вызываемом канале и доходит
-   до шлюза в любом случае.
-2. **Вариант с транком** — если номер должен идти «штатным» способом:
-   `Connectivity → Trunks → Add SIP (chan_pjsip) Trunk`, SIP Server = адрес
-   шлюза, Context = `from-internal`, и Outbound Route уже на этот транк. Но
-   транку нужен **статический адрес шлюза** — за CGNAT его нет (см. §7).
+Если номер в диал-строке не появился (получилось `Dial(PJSIP/1001)` без
+номера), номер надо передать отдельным заголовком — в `extensions_custom.conf`
+заменить строку `Dial(PJSIP/1001/${EXTEN},60)` на
+`Dial(PJSIP/1001,60,b(add-gsm-forward^s^1(${EXTEN})))`.
+Заголовок `X-GSM-Forward` добавляется уже на вызываемом канале и доходит
+до шлюза в любом случае.
+
+Ещё одна проверка — что транк вообще виден и рабочий:
+
+```bash
+asterisk -rx "dialplan show from-1"      # или номер контекста вашего маршрута
+asterisk -rx "pjsip show contacts"        # контакт 1001 должен быть Avail
+```
 
 ---
 
@@ -210,7 +264,7 @@ FreePBX номер в INVITE не положил, и нужно одно из д
 
 | Поле | Значение |
 |---|---|
-| SIP Server | `159.100.13.216` |
+| SIP Server | `185.82.73.76` |
 | SIP Port | `6064` |
 | SIP Username | `1001` |
 | SIP Password | `<ПАРОЛЬ>` (тот же, что в расширении) |
@@ -222,8 +276,42 @@ FreePBX номер в INVITE не положил, и нужно одно из д
 список «Own Number (SIM)» под полем. Приложение выбирает SIM по номеру
 CallerID, который приходит из PBX.
 
-На телефоне: SIM вставлена, root-доступ приложению выдан, Magisk разрешил
-приложению работать в фоне.
+### 5.1 Два обязательных условия на телефоне
+
+**1. Приложение должно быть дефолтным набором номера.**
+Входящий GSM-звонок перехватывается через `InCallService`, а Telecom
+поднимает его только для дефолтного набора. Пока роль не занята, входящие
+звонки до шлюза не доходят — при этом SIP зарегистрирован и всё выглядит
+рабочим.
+
+```bash
+adb shell cmd role get-role-holders android.app.role.DIALER
+adb shell cmd role add-role-holder android.app.role.DIALER com.callagent.gateway 0
+```
+
+В логах приложения после этого должно быть `Default dialer: yes`, а не
+`WARNING: not the default dialer …`.
+
+**2. VPN на телефоне должен быть выключен** (для направления PBX → GSM).
+Подробно — в [`README.md`](README.md) §0.4. Коротко: пока активен Surfshark,
+сервер видит адрес VPN-выхода, и входящий INVITE до шлюза не доходит.
+
+Проверить, что VPN выключен и какой адрес видит сервер:
+
+```bash
+adb shell dumpsys connectivity | grep -A2 "VPN CONNECTED"   # не должно быть VPN CONNECTED
+```
+
+В логе приложения строка `STUN public IP: <ip>:<port>` — это тот адрес,
+который видит интернет. Он должен совпадать с адресом в `Contact` на
+сервере.
+
+**3. SIM должна быть вставлена.** Проверка:
+
+```bash
+adb shell getprop gsm.sim.state      # READY, а не ABSENT
+adb shell dumpsys isub | head -20     # ICCID не N/A
+```
 
 ---
 
@@ -249,10 +337,11 @@ tail -f /var/log/asterisk/full
 
 | Сообщение | Что значит |
 |---|---|
-| `Request 'INVITE' from '<sip:1001@159.100.13.216>' … No matching endpoint found` | PBX не нашёл эндпоинт по имени из `From` — проверьте, что расширение называется ровно `1001` и что `Trust RPID = Yes` |
+| `Request 'INVITE' from '<sip:1001@185.82.73.76>' … No matching endpoint found` | PBX не нашёл эндпоинт по имени из `From` — проверьте, что расширение называется ровно `1001` и что `Trust RPID = Yes` |
 | `403 Forbidden` / `401 Unauthorized` и обрывы | не сходится пароль или не включён `trust_id_inbound` |
 | `603 Declined` | эндпоинт найден, но AOR без контакта — шлюз не зарегистрировался (проверьте пароль и порт) |
 | `488` от шлюза в логе приложения | INVITE пришёл без номера — см. §4 |
+| INVITE ушёл, ответа нет, `No response` / таймаут | INVITE не дошёл до шлюза: VPN активен либо входящие UDP на роутер не доходят — см. README §0.4 |
 
 В логе приложения (`Settings → Logs`):
 
@@ -272,38 +361,32 @@ tail -f /var/log/asterisk/full
   одного упоминания `1001`, и маршрута просто не существует. Проверка:
   `grep -n "1001" /etc/asterisk/extensions.conf` должна что-то найти.
 
-- **PBX → GSM из интернета.** Для исходящего маршрута нужен транк, а транку
-  нужен адрес шлюза, доступный с сервера. За CGNAT мобильного оператора
-  публичного адреса нет: нужен белый IP (свой или Wi-Fi с белым IP) либо
-  туннель с обратным входом (WireGuard, Tailscale). После этого:
+- **Входящий INVITE с сервера должен доходить до шлюза.** Это не вопрос
+  настройки FreePBX, а вопрос сети: телефон должен принимать UDP из интернета
+  по адресу, который он сам объявил в `Contact`. Пока на телефоне включён
+  Surfshark, адрес в `Contact` — это адрес VPN-выхода, и пакеты от сервера
+  туда не попадут. Варианты:
 
-  `Connectivity → Trunks → Add Trunk → Add SIP (chan_pjsip) Trunk`
+  1. **Выключить VPN** (или исключить приложение из туннеля в Split
+     tunneling). Тогда в `Contact` будет реальный адрес Starlink-роутера
+     (`145.224.123.93` на момент проверки) — но нужен ещё проброс порта
+     `UDP 5062` на самом роутере Starlink, иначе пакет до телефона не дойдёт.
+  2. **Туннель с обратным входом** (WireGuard, Tailscale) между телефоном и
+     сервером. Тогда телефон получает адрес из туннеля, и в `Contact`
+     попадёт именно он — сервер достучится напрямую. Это единственный
+     вариант, который работает при CGNAT.
 
-  | Вкладка | Поле | Значение |
-  |---|---|---|
-  | General | Trunk Name | `gsm-gateway` |
-  | General | Outbound CallerID | `<SIM>` |
-  | General | Maximum Channels | 1 |
-  | pjsip Settings → General | Username | `1001` |
-  | pjsip Settings → General | Auth username | `1001` |
-  | pjsip Settings → General | Secret | `<ПАРОЛЬ>` |
-  | pjsip Settings → General | SIP Server | `<адрес шлюза>` (белый IP или адрес в туннеле) |
-  | pjsip Settings → General | SIP Server Port | `6064` |
-  | pjsip Settings → General | Authentication | Outbound |
-  | pjsip Settings → General | Registration | None |
-  | pjsip Settings → General | Context | `from-internal` |
-  | pjsip Settings → Advanced | From User | `1001` |
-  | pjsip Settings → Advanced | Codecs | `ulaw`, `alaw` |
-  | pjsip Settings → Advanced | Trust RPID | Yes |
-  | pjsip Settings → Advanced | Send RPID | Send P-Asserted-Identity header |
+  Проверка достижимости снаружи (с любого внешнего хоста):
 
-  В исходящем маршруте Trunk Sequence = `gsm-gateway`.
+  ```bash
+  # на телефоне — смотреть, пришёл ли пакет
+  adb shell su -c 'tcpdump -i any udp port 5062'
+  # с внешнего хоста — отправить
+  nc -u -w 3 <адрес-из-Contact> 5062
+  ```
 
-  Внимание: у транка FreePBX сам создаёт `identify` с `match=<адрес шлюза>`.
-  Если адрес шлюза совпадёт с адресом, с которого приходят его собственные
-  INVITE, входящий звонок с SIM попадёт в контекст транка, а не в
-  `from-gsm-gateway`. Лечится либо контекстом транка `from-gsm-gateway`,
-  либо Inbound Route на DID = номер SIM.
+  Если пакет не появился в tcpdump — сеть его не доставляет, и это не
+  вопрос настроек FreePBX.
 
 - **Номер SIM в SIM-карте.** Пока SIM не вставлена, приложение не знает
   номера — задайте его вручную в настройках.

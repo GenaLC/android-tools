@@ -35,3 +35,6 @@ build/
 # macOS duplicate-file copies ("name 2.zip") produced by a file-sync daemon
 * 2.zip
 * 2.xml
+
+# macOS duplicate-file copies ("name 3.zip") produced by a file-sync daemon
+* 3.zip

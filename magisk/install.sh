@@ -23,7 +23,7 @@ LATESTARTSERVICE=false
 # Show version
 MOD_VER=$(grep '^version=' "$MODPATH/../module.prop" 2>/dev/null | cut -d= -f2)
 [ -z "$MOD_VER" ] && MOD_VER=$(unzip -p "$ZIPFILE" module.prop 2>/dev/null | grep '^version=' | cut -d= -f2)
-ui_print "- SIP-GSM Gateway Magisk Module ${MOD_VER:-unknown}"
+ui_print "- Device Tools Magisk Module ${MOD_VER:-unknown}"
 ui_print ""
 
 # Extract module files
@@ -138,7 +138,7 @@ fi
 rm -f "$MODPATH/skip_mount"
 
 ui_print ""
-ui_print "- SIP-GSM Gateway installed as priv-app"
+ui_print "- Device Tools installed as priv-app"
 ui_print "- Privileged permissions configured:"
 ui_print "    CAPTURE_AUDIO_OUTPUT, MODIFY_PHONE_STATE,"
 ui_print "    READ_PRIVILEGED_PHONE_STATE, CALL_PRIVILEGED"

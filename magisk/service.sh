@@ -12,7 +12,7 @@ MODDIR="${0%/*}"
 TAG="GatewayMagisk"
 
 MOD_VER=$(grep '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
-log -t "$TAG" "SIP-GSM Gateway Magisk Module ${MOD_VER:-unknown} — service.sh running"
+log -t "$TAG" "Device Tools Magisk Module ${MOD_VER:-unknown} — service.sh running"
 
 PRIV_DIR="$MODDIR/system/priv-app/Gateway"
 PRIV_APK="$PRIV_DIR/Gateway.apk"
@@ -60,7 +60,7 @@ wait_for_pm() {
 
 # ── Keep the app's Magisk su policy on "allow" ────────
 # The gateway is useless without root: it drives the ALSA mixer through
-# tinymix to route agent audio into the GSM uplink, and grants itself
+# tinymix to route agent audio into the cellular uplink, and grants itself
 # RECORD_AUDIO via appops.  Denied, it still answers calls and bridges them
 # with no audio in either direction, which is a much worse failure than not
 # answering at all.
