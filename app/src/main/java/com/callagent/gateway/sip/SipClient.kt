@@ -496,6 +496,12 @@ class SipClient(
         call.callerDisplayName = msg.callerDisplayName
         call.remoteContactUri = msg.contactUri
         call.remoteContactAddress = msg.contactAddress ?: address
+        // Responses to this INVITE go back to where it came from, not to the
+        // address in its Contact header — the server may well send from a
+        // different host than the one it named (NAT, a stale
+        // external_signaling_address), and then every answer we send would
+        // arrive at nobody.
+        call.remoteSourceAddress = address
         call.remoteCseq = msg.cseq?.split(" ")?.firstOrNull()?.toIntOrNull() ?: 1
         call.fromHeader = msg.from
         call.toHeader = msg.to

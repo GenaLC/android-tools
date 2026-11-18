@@ -930,7 +930,7 @@ class CallOrchestrator(
         // Send 180 Ringing to SIP caller while GSM dials
         sipCall.originalInvite?.let { invite ->
             val ringing = com.callagent.gateway.sip.SipBuilder.ringing180(invite, sipCall.localTag)
-            sipClient.sendTo(ringing, sipCall.remoteContactAddress ?: sipClient.serverAddress)
+            sipClient.sendTo(ringing, sipCall.responseTarget())
         }
 
         // Dial via the SIM whose configured own number matches the SIP

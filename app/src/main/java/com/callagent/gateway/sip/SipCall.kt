@@ -40,6 +40,33 @@ class SipCall(
     var remoteContactUri: String? = null
     var remoteContactAddress: Pair<String, Int>? = null
 
+    /**
+     * Where the request that created this call actually came from — the
+     * source address of the packet, not the address in its Contact header.
+     *
+     * RFC 3261 §8.1.3.3: a response to a request goes back to where the
+     * request came from (the Via sent-by address, or the real source address
+     * when the sender used `rport`).  The Contact header names the address
+     * for *in-dialog* requests only.  Answering to the Contact instead sends
+     * the response somewhere the caller is not listening, and the caller
+     * then waits out its own transaction timeout: the call looks like it
+     * rings for ever and then drops.
+     *
+     * This bites in practice when the server's Contact does not match the
+     * address it actually sends from — a PBX behind NAT, or one whose
+     * `external_signaling_address` names a different host.
+     */
+    var remoteSourceAddress: Pair<String, Int>? = null
+
+    /**
+     * Where a response to this call's initial request has to go.  For an
+     * inbound call that is the address the request came from; for an
+     * outbound one there is no source address, and the Contact (which the
+     * server put in its 200 OK) is the right target.
+     */
+    fun responseTarget(): Pair<String, Int> =
+        Companion.responseTarget(remoteSourceAddress, remoteContactAddress, sipClient.serverAddress)
+
     // CSeq tracking
     var localCseq: Int = 1
     var remoteCseq: Int = 0
@@ -227,7 +254,7 @@ class SipCall(
                 // Send 200 OK to BYE
                 sipClient.sendResponse(
                     SipBuilder.ok200(msg, sipClient.username, sipClient.publicIp, sipClient.localPort),
-                    remoteContactAddress ?: sipClient.serverAddress
+                    responseTarget()
                 )
                 state = State.TERMINATED
                 listener?.onCallTerminated(this)
@@ -243,7 +270,7 @@ class SipCall(
                 Log.i(TAG, "Received CANCEL for call $callId")
                 sipClient.sendResponse(
                     SipBuilder.ok200(msg, sipClient.username, sipClient.publicIp, sipClient.localPort),
-                    remoteContactAddress ?: sipClient.serverAddress
+                    responseTarget()
                 )
                 if (state != State.ANSWERED && state != State.TERMINATED) {
                     reject(487, "Request Terminated", localTag)
@@ -413,7 +440,7 @@ class SipCall(
             negotiatedPayloadType = this.negotiatedPayloadType
         )
 
-        val address = invite.contactAddress ?: sipClient.serverAddress
+        val address = responseTarget()
         sipClient.sendResponse(ok, address)
 
         state = State.ANSWERED
@@ -426,7 +453,7 @@ class SipCall(
         val invite = originalInvite ?: return
 
         val response = SipBuilder.reject(invite, code, reason, toTag)
-        sipClient.sendResponse(response, invite.contactAddress ?: sipClient.serverAddress)
+        sipClient.sendResponse(response, responseTarget())
 
         state = State.TERMINATED
         Log.i(TAG, "Rejected inbound call $callId with $code $reason")
@@ -506,5 +533,26 @@ class SipCall(
 
     companion object {
         private const val TAG = "SipCall"
+
+        /**
+         * Pick the address a response has to go to.
+         *
+         * RFC 3261 §8.1.3.3 sends a response to where the request came from.
+         * The Contact header names the address for in-dialog requests, and a
+         * server may send from a different host than the one it advertised
+         * there — behind NAT, or with a stale `external_signaling_address`.
+         * Answering to the Contact then delivers the answer to nobody, and
+         * the caller waits out its own transaction timeout: the call rings
+         * for ever and then drops.
+         *
+         * [source] is the source address of the request that started the
+         * call, [contact] the address from its Contact header, [fallback]
+         * where to go when neither is known.
+         */
+        fun responseTarget(
+            source: Pair<String, Int>?,
+            contact: Pair<String, Int>?,
+            fallback: Pair<String, Int>,
+        ): Pair<String, Int> = source ?: contact ?: fallback
     }
 }
