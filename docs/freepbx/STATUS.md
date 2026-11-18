@@ -46,35 +46,94 @@ FreePBX не добавил в маршрут ни одного trunk-макро
 
 ## 3. Подтверждённые экспериментом формы dial-string
 
-Проверено `channel originate` + tcpdump на телефоне (`/data/local/tmp/sip_test.txt`).
+Проверено `channel originate` + tcpdump/лог на телефоне и в
+`/var/log/asterisk/full` на сервере. Замеры — 2026-11-18, телефон
+`X100260121014541`, контакт AOR `1001` = `187.40.252.67:20716`.
 
 | Форма | Результат |
 |-------|-----------|
-| `PJSIP/1001/sip:<номер>@<хост>` | ✅ Request-URI `sip:<номер>@<host-контакта>` |
-| `PJSIP/<номер>@1001` | ✅ Request-URI `sip:<номер>@<host-контакта>` |
-| `PJSIP/1001/sip:<номер>@<contact-host:port>` | ✅ то же |
-| `PJSIP/1001/<номер>` | ❌ номер теряется, остаётся `sip:1001@…` |
-| `PJSIP/1001` | ❌ номер теряется (текущее поведение) |
+| `PJSIP/<номер>@1001` | ✅ INVITE доставлен на телефон; Request-URI `sip:<номер>@187.40.252.67:20716` — хост:порт живого контакта AOR, user = набранный номер |
+| `PJSIP/1001/sip:<номер>@185.82.73.76` | ❌ `Transmitting SIP request to UDP:185.82.73.76:5060` — INVITE ушёл на сам PBX, `Packet timed out after 32000ms with no response` |
+| `PJSIP/1001/<номер>` | ❌ `Could not create dialog to invalid URI '<номер>'` — диалог не создаётся вовсе |
+| `PJSIP/1001` | ❌ номер теряется (текущее поведение маршрута) → `sip:1001@…` |
 
-Правило FreePBX, из которого это следует (`macroDialone.php`):
+**Правило, которое за этим стоит:** res_pjsip отправляет INVITE **на хост,
+указанный в URI**. Отсюда:
+
+- `@1001` — хост берётся из **живого AOR-контакта** эндпоинта `1001`
+  (то, что телефон заявил в `Contact` при регистрации) → пакет приходит
+  туда, куда надо, а user-часть URI остаётся набранным номером;
+- `@185.82.73.76` — хост берётся **дословно** из строки → INVITE уходит на
+  сам PBX (и на порт 5060 вместо 6064) и истёкает по таймауту;
+- `PJSIP/1001/<номер>` — res_pjsip не понимает такой хвост как URI → ошибка
+  создания диалога.
+
+Правило FreePBX, из которого следует приоритет «строка с `@` или двумя `/`
+используется как есть» (`macroDialone.php`):
 
 > «If this dialstring contains an @, or two /'s, then it's ALREADY something we
 > can dial, and does not need to be extracted.»
 
 То есть строка, содержащая `@` или два `/`, уходит в `Dial()` **как есть**,
-без разворачивания в контакт AOR. Именно поэтому работают только формы с
-полным URI, а `PJSIP/1001/<номер>` (два слэша, но не URI) уходит в res_pjsip
-как «эндпоинт + непонятный хвост» и молча деградирует до контакта AOR.
+без разворачивания в контакт AOR.
 
 **Вывод:** номер можно доставить только dial-string'ом, который сам несёт URI
-с номером. Путь «маршрут → расширение 1001» номер доставить не может
-физически.
+с номером **и** хостом, который res_pjsip умеет превратить в живой контакт —
+то есть `PJSIP/<номер>@1001`. Путь «маршрут → расширение 1001» номер
+доставить не может физически.
+
+Подтверждённый результат на телефоне (лог приложения):
+
+```
+Incoming SIP call: fdd3c314-…, gsm_forward=null, outbound_cid=anonymous
+GSM destination resolved: +380507137641
+Outbound flow: dialing GSM +380507137641
+Rejected inbound call … with 503 No Matching SIM
+```
+
+Номер распознан — `488` больше нет. Дальше упёрлись в отсутствие SIM.
 
 ## 4. Конфигурация, которую нужно применить
 
 Правки выполняет администратор сервера.
 
-### 4.1 Кастомный контекст, который звонит на шлюз с номером
+### 4.1 Вариант A (основной): Custom Trunk
+
+`Connectivity → Trunks → Add Trunk → Add Custom Trunk`:
+
+| Поле | Значение |
+|---|---|
+| Trunk Name | `gsm-gateway` |
+| Custom Dial String | `PJSIP/$OUTNUM$@1001` |
+| Outbound CallerID | номер SIM в E.164 (тот же, что в настройках шлюза) |
+| Maximum Channels | `1` |
+
+Что FreePBX делает с этой строкой (`core/functions.inc.php:2070` + ветка
+`customtrunk` в `macro-dialout-trunk`):
+
+```
+OUT_<id> = AMP:PJSIP/$OUTNUM$@1001
+→ pre_num = PJSIP/ , the_num = OUTNUM , post_num = @1001
+→ Dial(PJSIP/+380507137621@1001)
+```
+
+То есть на выходе — ровно та строка, которая проверена на проводе (§3).
+Кастомный транк **не пишет ничего в `pjsip.conf`** (в `Core::addTrunk` для
+`tech=custom` нет ветки) — значит, не конфликтует с рукописным эндпоинтом
+`1001`.
+
+Проводку транка в маршрут — `Connectivity → Outbound Routes → Outbound Route
+40181`:
+
+| Поле | Значение |
+|---|---|
+| Trunk Sequence | `gsm-gateway` (созданный Custom Trunk) |
+| Route CID | номер SIM в E.164 (CallerID, по которому шлюз выбирает SIM) |
+| Override Extension | Yes |
+| Dial Patterns → Match Pattern | `+X.` |
+| Dial Patterns → CallerID | пусто (это фильтр) |
+
+### 4.2 Вариант B: кастомный контекст + правка `dest`
 
 `/etc/asterisk/extensions_custom.conf` (файл подключён штатно: `#include
 extensions_custom.conf` в `extensions.conf:31`; в Asterisk `#include` — не
@@ -86,10 +145,7 @@ exten => _+X.,1,Dial(PJSIP/${EXTEN}@1001,60)
 exten => _+X.,2,Hangup()
 ```
 
-`Dial(PJSIP/<номер>@1001)` — форма №2 из таблицы выше: берёт контакт AOR
-живого эндпоинта `1001`, но ставит в user-часть URI набранный номер.
-
-### 4.2 Маршрут должен уходить в этот контекст, а не в `from-did-direct`
+и маршрут должен уходить в этот контекст, а не в `from-did-direct`:
 
 ```sql
 UPDATE outbound_routes SET dest='gsm-outbound,${EXTEN},1' WHERE route_id=351;
@@ -98,14 +154,32 @@ UPDATE outbound_routes SET dest='gsm-outbound,${EXTEN},1' WHERE route_id=351;
 `dest` рендерится дословно → получится `Goto(gsm-outbound,${EXTEN},1)`, и в
 момент перехода `EXTEN` ещё равен набранному номеру.
 
-После этого — **Apply Config** (или `asterisk -rx "dialplan reload"`).
-
 > Внимание: значение `dest` перезаписывается, если открыть этот маршрут в GUI
 > и сохранить его. После Apply Config стоит проверить:
 > `asterisk -rx "dialplan show outrt-351"` → последняя строка должна быть
 > `Goto(gsm-outbound,${EXTEN},1)`.
 
-### 4.3 Транспорт: внешний адрес
+### 4.3 Общее для обоих вариантов: убрать остаточный `dest`
+
+Маршрут 351 сейчас имеет `dest='from-did-direct,1001,1'` — это «куда звонить,
+если все транки отказали». Пока там это значение, любой отказ транка
+приведёт к потере номера и `488`. После выбора варианта:
+
+```sql
+UPDATE outbound_routes SET dest='' WHERE route_id=351;
+```
+
+Затем — **Apply Config** (или `asterisk -rx "dialplan reload"`).
+
+Проверка, что транк подхватился:
+
+```bash
+grep -E "^OUT_[0-9]+ ?=" /etc/asterisk/extensions_additional.conf | grep -i gsm
+# ожидается:  OUT_244 = AMP:PJSIP/$OUTNUM$@1001
+asterisk -rx "dialplan show outrt-351" | tail -3
+```
+
+### 4.4 Транспорт: внешний адрес
 
 `/etc/asterisk/pjsip.transports.conf` — в `external_media_address` и
 `external_signaling_address` сейчас прописан адрес **чужого стенда**, а не
@@ -124,7 +198,7 @@ asterisk -rx "pjsip show transports"     # запомнить имя транс�
 asterisk -rx "module reload res_pjsip"   # или перезапуск asterisk
 ```
 
-### 4.4 Заглушка в `[from-gsm-gateway]`
+### 4.5 Заглушка в `[from-gsm-gateway]`
 
 `extensions_custom.conf` содержит `Dial(PJSIP/<40181>,60)` — плейсхолдер
 вместо номера. Для входящего GSM→PBX нужно `Dial(PJSIP/40181,60)`.
@@ -133,9 +207,12 @@ asterisk -rx "module reload res_pjsip"   # или перезапуск asterisk
 
 1. **SIM в телефоне отсутствует**: `gsm.sim.state = ABSENT,ABSENT`. Сотовная
    нога физически не заработает.
-2. **Выбор SIM по CallerID**: тестовые INVITE дали
-   `Cannot dial GSM: SIP Outbound CID anonymous does not select a unique SIM`.
-   Нужен маппинг CallerID (`40181`) → слот SIM.
+2. **Выбор SIM по CallerID**: при тестовом INVITE (CallerID `anonymous`)
+   приложение ответило `503 No Matching SIM` —
+   `Outbound CID anonymous matched 0 SIM accounts`. С маршрутом, у которого
+   задан Route CID, приложение получит CallerID этого маршрута и должно
+   выбрать слот по нему. Нужен реальный SIM и совпадение номера SIM с
+   «Own Number» в настройках шлюза.
 3. **Входящая доступность PBX → телефон**: телефон за CGNAT Starlink
    (`145.224.123.93`) плюс NordVPN. Работает только если INVITE приходит с
    того же адреса и порта, что и REGISTER (NAT-отображение уже создано) —
@@ -150,7 +227,9 @@ asterisk -rx "module reload res_pjsip"   # или перезапуск asterisk
 - **Телефон** `X100260121014541` (Cubot X100, Android 15, Magisk root),
   приложение v1.4.19 (versionCode 458), роль DIALER = `com.callagent.gateway`.
   Зарегистрирован: `Registered with 185.82.73.76`. VPN NordVPN активен
-  (`tun0`, публичный IP `187.40.252.72`). Локальный SIP-сокет `10.5.0.2:5062`.
+  (`tun0`; публичный IP и внешний порт меняются при переподключении — на
+  момент замера контакт AOR был `sip:1001@187.40.252.67:20716`).
+  Локальный SIP-сокет `10.5.0.2:5062`.
 - **Сервер**: `freepbx.sangoma.local`, `inet 185.82.73.76/24`, Asterisk
   18.19.0, FreePBX 16.0.50, единственный транспорт `0.0.0.0-udp:6064`.
   Эндпоинт `1001`: `context=from-gsm-gateway`, `allow=(ulaw|alaw)`,
