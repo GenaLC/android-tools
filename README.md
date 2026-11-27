@@ -242,6 +242,35 @@ back to the HAL, which on this phone means no call audio).
 - **Power**: Always connected to charger
 - **Build host**: Linux with JDK 17+
 
+## What's new in 1.4.20
+
+- **The Cubot X100 (MediaTek MT6855) works as a gateway**, in both directions,
+  and the phone itself stays out of the conversation. The agent's voice goes
+  into the modem's uplink digitally, the subscriber's voice comes back out of
+  it, the handset's loudspeaker is silenced at the output device, and the
+  handset's **microphone is disconnected from the capture** — so the room
+  around the gateway is not in the call. The microphone is cut at the analogue
+  stage, where it is still separable from the caller's voice: every other
+  lever on this chip cuts the route the two share, and takes the caller's
+  voice with it.
+- **MediaTek support by measurement, not by assumption.** The gateway probes
+  the mixer for the controls the phone actually has and writes only those —
+  the speech mutes live under different names on different generations, and
+  writing a control that does not exist leaves the handset in the call.
+- **Plain SIP over UDP**, with TLS optional: the gateway identifies itself by
+  name rather than by address, so it works behind NAT without a static IP.
+  A private PBX's CA can be imported for the TLS variant.
+- **Android 7 (minSdk 24)** is the floor again, with the µ-law codec and
+  digest authentication fixed on the way.
+- **The dialled number is taken from the `To` header** as well as from the
+  request URI, so a call placed from a PBX that puts the number only there
+  reaches the right subscriber.
+- **The app is called "Device Tools"** and no longer names the gateway in its
+  user-agent strings.
+- **Docs**: a FreePBX 16 runbook that walks the GUI click by click, the
+  voice-path measurements behind every audio decision, and a recipe for
+  scaling to several phones — one AOR, auth, endpoint, trunk and route each.
+
 ## What's new in 1.4.18
 
 - **The Galaxy S10e works**, the phone this README used to call impossible: its
