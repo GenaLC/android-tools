@@ -570,6 +570,7 @@ class GatewayService : Service() {
                 // SMS_DELIVER, which may not have happened yet at that point.
                 markInboxRead()
                 var failed = false
+                var authFailure = false
                 for (sms in queue) {
                     val code = sendSmsOverSip(sip, sms)
                     if (code == 200 || code == 202) {
@@ -582,10 +583,24 @@ class GatewayService : Service() {
                                 "(${if (code == 0) "no response" else code.toString()}) — queued"
                         )
                         failed = true
+                        // 401/403 is a credential problem, not a transient
+                        // one: the server will not take the message until
+                        // somebody fixes the endpoint.  Retrying every 30 s
+                        // only wakes the radio and fills the log — and on a
+                        // gateway that forwards dozens of messages it buries
+                        // the real event.  The messages stay queued; they go
+                        // out on the next flush once the credentials work.
+                        authFailure = code == 401 || code == 403
+                        if (authFailure) {
+                            broadcastLog(
+                                "SMS: server rejected with $code — messages stay queued " +
+                                    "until the server accepts them again (check the endpoint password)"
+                            )
+                        }
                         break   // keep order; a later one is no more likely to land
                     }
                 }
-                if (failed) scheduleSmsRetry()
+                if (failed && !authFailure) scheduleSmsRetry()
             } catch (e: Exception) {
                 Log.e(TAG, "SMS flush failed: ${e.message}", e)
                 scheduleSmsRetry()
@@ -1728,6 +1743,24 @@ class GatewayService : Service() {
      * the UID mode (set by PermissionController).  UID mode overrides
      * package mode, so without --uid the allow is ineffective on cold boot.
      */
+    /**
+     * The PermissionController kill, and only when no call is up.
+     *
+     * Killing it makes it re-apply the UID-level appop mode, but it also
+     * makes it re-run the permission policy synchronisation — and
+     * ActivityManager kills a package whose runtime permission was revoked
+     * the moment that synchronisation lands ("Killing com.callagent.gateway:
+     * permissions revoked", measured 2026-11-19 17:43, which killed the
+     * gateway in the middle of a live call).  The UID mode is set directly by
+     * the appops commands below, so the kill is not needed to get it right,
+     * and not worth a dropped call.
+     */
+    private fun permissionControllerKill(): String =
+        if (GsmCallManager.activeCall == null) {
+            "killall com.google.android.permissioncontroller 2>/dev/null; " +
+            "killall com.android.permissioncontroller 2>/dev/null; "
+        } else ""
+
     private fun forceAllowRecordAudio() {
         try {
             val pkg = packageName
@@ -1764,14 +1797,12 @@ class GatewayService : Service() {
                 "appops set $pkg AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore 2>&1; " else ""
             val uidFlag = if (Build.VERSION.SDK_INT >= 29) "--uid " else ""
             val result = RootShell.execForOutput(
-                "killall com.google.android.permissioncontroller 2>/dev/null; " +
-                "killall com.android.permissioncontroller 2>/dev/null; " +
+                permissionControllerKill() +
                 "pm grant $pkg android.permission.RECORD_AUDIO 2>&1; " +
                 autoRevoke +
                 "appops set ${uidFlag}$pkg RECORD_AUDIO allow 2>&1; " +
                 "appops set $pkg RECORD_AUDIO allow 2>&1; " +
-                "killall com.google.android.permissioncontroller 2>/dev/null; " +
-                "killall com.android.permissioncontroller 2>/dev/null; " +
+                permissionControllerKill() +
                 "appops get ${uidFlag}$pkg RECORD_AUDIO 2>&1"
             )
             val elapsed = System.currentTimeMillis() - t0
