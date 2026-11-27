@@ -386,9 +386,17 @@ echo '=== MTK_END ==='
     /** A mixPort whose name mentions incall. */
     private val MIXPORT_INCALL = Regex("""mixPort name="[^"]*incall[^"]*"""")
 
-    /** The telephony device ports, as the policy names them. */
-    private val DEVICEPORT_TX = Regex("""devicePort name="Telephony Tx"""")
-    private val DEVICEPORT_RX = Regex("""devicePort name="Telephony Rx"""")
+    /**
+     * The telephony device ports, as the policy names them.
+     *
+     * The attribute is spelled `name` on some builds and `tagName` on others
+     * — the MT6855 policy uses `tagName`, and looking for `name` alone made
+     * the probe report a telephony TX device port that was right there in the
+     * file.  That false negative is what pushed the device onto the
+     * background-sound route, which on this generation is an acoustic loop.
+     */
+    private val DEVICEPORT_TX = Regex("""devicePort (?:tagName|name)="Telephony Tx"""")
+    private val DEVICEPORT_RX = Regex("""devicePort (?:tagName|name)="Telephony Rx"""")
 
     /** A mixPort that sinks into the telephony TX device. */
     private val SINK_TX = Regex("""sink="Telephony Tx"""")

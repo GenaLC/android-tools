@@ -797,6 +797,23 @@
                             android:textColor="@color/text_hint"
                             android:paddingTop="6dp" />
 
+                        <CheckBox
+                            android:id="@+id/cbCfgDigitalBridge"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Digital bridge"
+                            android:buttonTint="@color/accent"
+                            android:textColor="@color/text_label"
+                            android:layout_marginTop="8dp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Keeps this phone out of the conversation: the agent's voice goes straight into the cellular uplink and the phone's own microphone is muted, so nothing is heard on the speaker and no room noise reaches the agent. Turn off only if the GSM side goes silent — that fallback keeps the old acoustic loop, where the speaker plays the agent and the microphone carries him to the caller."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
                         <Button
                             android:id="@+id/btnCfgClearRecents"
                             android:layout_width="wrap_content"

@@ -167,6 +167,12 @@ class RtpSession(
     @Volatile private var lastRtpReceivedTime = 0L
     private val RTP_TIMEOUT_MS = 30_000L  // 30 seconds with no RTP = dead call
 
+    /** The last late HAL parameter written, so a tick does not rewrite it. */
+    @Volatile private var lastLateHalParam: String? = null
+
+    /** The last result of the diagnostic microphone command. */
+    @Volatile private var lastDiagnosticMicOut: String? = null
+
     // Packet counters and audio diagnostics
     @Volatile var txPacketCount = 0L; private set
     @Volatile var rxPacketCount = 0L; private set
@@ -185,6 +191,27 @@ class RtpSession(
     @Volatile private var trimmedFrames = 0L
     @Volatile var audioSourceName = "none"; private set
     @Volatile private var playbackUsageName = "MEDIA"
+
+    /**
+     * Whether the digital bridge is on for this session: the agent's audio
+     * goes into the modem's uplink and the handset's microphone is out of the
+     * call.  Set in [initAudio], read by the playback loop once the HAL has
+     * settled and the handset mutes are written. */
+    @Volatile private var digitalBridgeActive = false
+
+    /**
+     * The same question, asked before the audio is up.
+     *
+     * The capture source list is built before the audio is initialised, and
+     * the answer decides which sources are worth offering at all: with the
+     * digital bridge on, VOICE_CALL is a clean source (the uplink carries no
+     * room, because the agent never goes through the microphone), and the
+     * devices whose VOICE_DOWNLINK reads silence need it.
+     */
+    private fun digitalBridgeOn(): Boolean =
+        profile.digitalBridge &&
+            context.getSharedPreferences("gateway", Context.MODE_PRIVATE)
+                .getBoolean("digital_bridge", true)
 
     // Capture and playback rates may differ.  VOICE_CALL on MSM8930
     // only initializes at 8 kHz; G.722 decoding outputs 16 kHz PCM.
@@ -388,7 +415,12 @@ class RtpSession(
         configs.add(SourceConfig(MediaRecorder.AudioSource.MIC, "MIC", 8000))
         configs.add(SourceConfig(MediaRecorder.AudioSource.VOICE_COMMUNICATION, "VOICE_COMMUNICATION", 8000))
 
-        if (profile.voiceDownlinkWorks) {
+        // With the digital bridge on, VOICE_CALL stays in the chain: the
+        // agent's voice goes into the modem's uplink digitally and never
+        // passes the microphone, so the uplink it mixes in is clean — and on
+        // the devices whose VOICE_DOWNLINK delivers nothing but silence it is
+        // the only source that carries the caller at all.
+        if (profile.voiceDownlinkWorks && !digitalBridgeOn()) {
             // Where the modem downlink is capturable, it is the only source we
             // want: VOICE_CALL mixes uplink AND downlink, and the uplink now
             // carries the agent's own injected voice, so the agent hears itself
@@ -496,13 +528,32 @@ class RtpSession(
             if (audioDiagnosticsEnabled()) logCaptureDiagnostics(record)
         }
 
+        // The digital bridge: the agent's audio goes into the modem's uplink
+        // (the telephony TX device) instead of the phone's speaker, and the
+        // handset's microphone is kept out of the call.  Without it the
+        // bridge is an acoustic loop — the speaker plays the agent and the
+        // phone's own microphone carries him to the caller, so the gateway
+        // becomes a participant in the conversation.
+        //
+        // Settings → "Digital bridge" turns it off to fall back to that loop
+        // on a device whose audio policy does not offer the telephony TX
+        // route: there the GSM side would go silent once the microphone is
+        // muted.
+        val digitalBridge = digitalBridgeOn()
+        Log.i(TAG, "Digital bridge: $digitalBridge (profile=${profile.name})")
+        digitalBridgeActive = digitalBridge
+
         // Minimum buffer for lowest latency.  incall_music injects
         // AudioTrack output digitally into the modem uplink — there is no
         // acoustic speaker→mic path, so deep-buffer headroom is unnecessary.
         // Writing silence when the jitter buffer is empty prevents underruns.
-        val playChannelMask = if (profile.playbackStereo)
+        //
+        // The incall_music mixPort declares stereo and nothing else, so the
+        // digital route asks for a stereo track; the acoustic one stays mono.
+        val stereo = digitalBridge || profile.playbackStereo
+        val playChannelMask = if (stereo)
             AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-        playbackChannels = if (profile.playbackStereo) 2 else 1
+        playbackChannels = if (stereo) 2 else 1
         val minPlayBuf = AudioTrack.getMinBufferSize(
             playbackRate, playChannelMask, AudioFormat.ENCODING_PCM_16BIT
         )
@@ -533,8 +584,13 @@ class RtpSession(
         // earpiece but is NEVER injected into the modem uplink.
         // Using default (deep-buffer-playback → MultiMedia1) ensures the
         // Incall_Music Audio Mixer MultiMedia1 routes audio to the caller.
-        val usage = if (profile.playbackUsage >= 0) profile.playbackUsage
-                    else AudioAttributes.USAGE_MEDIA
+        val usage = when {
+            // The digital route asks the policy for the telephony TX device,
+            // and that mixPort is declared for STREAM_MUSIC.
+            digitalBridge -> AudioAttributes.USAGE_MEDIA
+            profile.playbackUsage >= 0 -> profile.playbackUsage
+            else -> AudioAttributes.USAGE_MEDIA
+        }
         val contentType = if (usage == AudioAttributes.USAGE_VOICE_COMMUNICATION)
             AudioAttributes.CONTENT_TYPE_SPEECH else AudioAttributes.CONTENT_TYPE_MUSIC
         playbackUsageName = when (usage) {
@@ -585,8 +641,12 @@ class RtpSession(
             .build()
         audioTrack = track
 
-        if (profile.playbackToTelephonyTx) {
+        if (digitalBridge || profile.playbackToTelephonyTx) {
             routeToTelephonyTx(track)
+            try {
+                Log.i(TAG, "Track routed: device=${track.routedDevice?.type}/${track.routedDevice?.productName} " +
+                    "rate=${track.sampleRate} channels=${track.channelCount}")
+            } catch (_: Exception) {}
         }
 
         // No platform AEC — AudioTrack is on USAGE_MEDIA (different stream
@@ -891,7 +951,12 @@ class RtpSession(
         configs.add(SourceConfig(MediaRecorder.AudioSource.MIC, "MIC", 8000))
         configs.add(SourceConfig(MediaRecorder.AudioSource.VOICE_COMMUNICATION, "VOICE_COMMUNICATION", 8000))
 
-        if (profile.voiceDownlinkWorks) {
+        // With the digital bridge on, VOICE_CALL stays in the chain: the
+        // agent's voice goes into the modem's uplink digitally and never
+        // passes the microphone, so the uplink it mixes in is clean — and on
+        // the devices whose VOICE_DOWNLINK delivers nothing but silence it is
+        // the only source that carries the caller at all.
+        if (profile.voiceDownlinkWorks && !digitalBridgeOn()) {
             // Where the modem downlink is capturable, it is the only source we
             // want: VOICE_CALL mixes uplink AND downlink, and the uplink now
             // carries the agent's own injected voice, so the agent hears itself
@@ -1152,6 +1217,14 @@ class RtpSession(
                 Log.i(TAG, "Mixer capture routing: $out")
             }, "mixer-capture").start()
         }
+
+        // The room must not be in the capture from the very first frame.
+        // The late pass in the timeout loop is three seconds into the call,
+        // and the microphone is live until then — so the cut goes in here,
+        // as soon as the capture exists.  The HAL programs the call path
+        // around this moment and puts the microphone back, which is why the
+        // cut is re-asserted later as well.
+        applyHandsetMicCut(captureRms)
 
         Log.i(TAG, "Capture started: source=$audioSourceName capRate=$captureRate session=$audioSessionId gain=${captureGain}x profile=${profile.name}")
         // Also report via RTP stats so it appears in the app log viewer
@@ -1503,6 +1576,31 @@ class RtpSession(
         if (running.get()) {
             reAssertAppOps()
             reToggleIncallMusic()
+            // The handset's own loudspeaker is muted now — three seconds in,
+            // with the digital capture already running.  The order matters: a
+            // framework mute of the voice path can take the path down with it
+            // on some chipsets, and then the agent stops hearing the caller.
+            // Muting after the capture is alive keeps the two apart, and the
+            // log carries the capture level from just before the mute.
+            try {
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                if (am != null) GsmCallManager.muteLocalVoiceOutput(am, captureRms)
+            } catch (e: Exception) {
+                Log.w(TAG, "Local voice output mute failed: ${e.message}")
+            }
+            // The profile's late HAL parameters — the ones that may take the
+            // voice path down with them — go in now, with the capture level
+            // from just before in the log.  If the capture goes quiet right
+            // after, that is what took it down.
+            // The handset's loudspeaker is muted at the output device — the
+            // codec's receiver and speaker paths — which is the one mute that
+            // cannot take the modem's downlink out of the agent's capture.
+            applyHandsetOutputMute(captureRms)
+            // The handset's microphone is disconnected from the analogue stage
+            // at the same moment: that is what takes the room out of what the
+            // agent hears, and it is the one cut that leaves the caller's
+            // voice alone (the caller's voice is digital by then).
+            applyHandsetMicCut(captureRms)
         }
 
         var tick = 0
@@ -1535,6 +1633,32 @@ class RtpSession(
                         getCpuStats()
                 Log.i(TAG, "RTP: $stats")
                 listener?.onRtpStats(stats)
+
+                // The vendor's uplink mute — the only lever that takes the
+                // handset's microphone out of the cellular uplink on this
+                // chipset — goes in here, with the capture level from just
+                // before in the log.  It may mute the whole uplink rather
+                // than the microphone source, and the agent's voice is
+                // injected into that same uplink, so it goes in late and its
+                // effect is measured rather than assumed.
+                //
+                // It is reconciled on every tick, not only on the first one:
+                // the override file can switch it off and on again while the
+                // call is up, and the effect of that switch on the capture
+                // level is what the A/B measurement is made of.
+                applyLateHalCallParams(captureRms)
+                applyDiagnosticMicCmd()
+
+                // Re-assert the output-device mute: the HAL rewrites those
+                // controls when it programs the call path and when it
+                // switches the output device, and the handset must not start
+                // playing the caller in the room again.
+                applyHandsetOutputMute(captureRms, repeat = true)
+
+                // …and the same for the microphone cut: the HAL programs the
+                // call path itself and puts the microphone back when it does,
+                // so the room would come back into the capture without this.
+                applyHandsetMicCut(captureRms, repeat = true)
 
                 val elapsed = System.currentTimeMillis() - lastRtpReceivedTime
                 if (elapsed > RTP_TIMEOUT_MS) {
@@ -1991,6 +2115,12 @@ class RtpSession(
             // already issues that command, and waiting for su -c was blocking
             // the playback thread for ~100ms.
             enableIncallMusicViaMixer()
+            // The HAL rewrites the voice mutes when it programs the call path,
+            // so the handset's microphone is taken out of the call here — after
+            // the HAL has settled, not at setup.  Only with the digital
+            // bridge: without the injection into the modem's uplink the
+            // microphone is the only way the agent reaches the caller.
+            applyHandsetMutes(digitalBridgeActive)
         }
 
         // Silence frame for when jitter buffer is empty — prevents underruns
@@ -2283,6 +2413,43 @@ class RtpSession(
     }
 
     /**
+     * Take the handset's microphone out of the call.
+     *
+     * The mixer commands come from the profile and are written only while the
+     * digital bridge is on: without the injection into the modem's uplink the
+     * microphone is the only path the agent's voice has to the caller, and
+     * muting it would leave the GSM side silent.
+     *
+     * The readback is part of the command, so the log shows what the mixer
+     * actually holds rather than what was asked for.
+     */
+    private fun applyHandsetMutes(digital: Boolean) {
+        val cmd = profile.mixerHandsetMuteCmd
+        if (cmd.isEmpty()) {
+            Log.i(TAG, "Handset mutes: none for ${profile.name}")
+            return
+        }
+        if (!digital) {
+            Log.i(TAG, "Handset mutes: skipped — the acoustic bridge needs the microphone")
+            return
+        }
+        val resolved = DeviceProfile.resolveCmd(cmd)
+        if (resolved.isEmpty()) {
+            Log.w(TAG, "Handset mutes: tinymix not found — cannot take the microphone out of the call")
+            return
+        }
+        Thread({
+            try {
+                val output = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                Log.i(TAG, "Handset mutes: $output")
+                listener?.onRtpStats("Handset mutes: $output")
+            } catch (e: Exception) {
+                Log.w(TAG, "Handset mutes failed: ${e.message}")
+            }
+        }, "RTP-HandsetMute").start()
+    }
+
+    /**
      * Re-assert RECORD_AUDIO appops via root.  Android's AppOpsService
      * re-revokes this permission for background apps when the screen turns
      * off, killing VOICE_CALL capture (rawCapRMS drops to ~6).  Called
@@ -2324,14 +2491,12 @@ class RtpSession(
                 "appops set $pkg AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore 2>&1; " else ""
             val uidFlag = if (Build.VERSION.SDK_INT >= 29) "--uid " else ""
             val result = RootShell.execForOutput(
-                "killall com.google.android.permissioncontroller 2>/dev/null; " +
-                "killall com.android.permissioncontroller 2>/dev/null; " +
+                permissionControllerKill() +
                 "pm grant $pkg android.permission.RECORD_AUDIO 2>&1; " +
                 autoRevoke +
                 "appops set ${uidFlag}$pkg RECORD_AUDIO allow 2>&1; " +
                 "appops set $pkg RECORD_AUDIO allow 2>&1; " +
-                "killall com.google.android.permissioncontroller 2>/dev/null; " +
-                "killall com.android.permissioncontroller 2>/dev/null; " +
+                permissionControllerKill() +
                 "appops get ${uidFlag}$pkg RECORD_AUDIO 2>&1"
             )
             val elapsed = System.currentTimeMillis() - t0
@@ -2352,6 +2517,328 @@ class RtpSession(
         } catch (e: Exception) {
             Log.w(TAG, "appops re-assert failed: ${e.message}")
         }
+    }
+
+    /**
+     * The PermissionController kill, and only when no call is up.
+     *
+     * Killing it is what makes it re-apply the UID-level appop mode — but it
+     * also makes it re-run the permission policy synchronisation, and
+     * ActivityManager kills a package whose runtime permission was revoked the
+     * moment that synchronisation lands ("Killing com.callagent.gateway:
+     * permissions revoked").  Measured 2026-11-19 17:43: the gateway killed
+     * itself in the middle of a live call that way, and the call died with
+     * it.  The UID mode is set directly by the appops command below, so the
+     * kill is not needed to get it right — only to make PermissionController
+     * stop overriding it, and that is not worth a dropped call.
+     */
+    private fun permissionControllerKill(): String =
+        if (GsmCallManager.activeCall == null) {
+            "killall com.google.android.permissioncontroller 2>/dev/null; " +
+            "killall com.android.permissioncontroller 2>/dev/null; "
+        } else ""
+
+    /**
+     * Apply the profile's late HAL parameters, and keep them applied.
+     *
+     * These are the parameters that may take a direction of the bridge down
+     * with them (the vendor's uplink mute on MediaTek).  The capture level
+     * from just before goes into the log, so that a parameter which silenced
+     * the caller's voice as well shows up as the drop it is instead of as a
+     * mystery.
+     *
+     * The mute can be switched off and on again while the call is up, by
+     * writing `0` or `1` into `/data/local/tmp/gw_ul_mute`.  That is the only
+     * honest way to tell "the caller went quiet" from "the mute took the
+     * downlink with it" — measured 2026-11-19 18:41 both happened within one
+     * call and the log alone could not tell them apart.
+     */
+    private fun applyLateHalCallParams(capRmsBefore: Int) {
+        val params = lateHalParams()
+        if (params.isEmpty()) return
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            for (p in params) {
+                val key = p.substringBefore('=')
+                val on = p.substringAfter('=')
+                val off = if (on == "1") "0" else "1"
+                val eff = if (lateHalOverride() == false) "$key=$off" else p
+                if (eff == lastLateHalParam) continue
+                val r = try { am.setParameters(eff) } catch (e: Exception) {
+                    Log.w(TAG, "late HAL param '$eff' failed: ${e.message}")
+                    continue
+                }
+                lastLateHalParam = eff
+                Log.i(TAG, "late HAL param '$eff' -> $r " +
+                        "(capRMS before=$capRmsBefore, override=${lateHalOverride() ?: "profile"})")
+                listener?.onRtpStats("Late HAL param $eff (capRMS before=$capRmsBefore)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "applyLateHalCallParams failed: ${e.message}")
+        }
+    }
+
+    /**
+     * The late HAL parameters to keep applied.
+     *
+     * The profile's own list is the default; `/data/local/tmp/gw_hal_param`
+     * replaces it with raw `key=value` lines, one per line.  That is what
+     * makes the candidates testable on a live call without a rebuild each
+     * time — and the candidates are the whole problem, because every mute of
+     * the voice path on this chipset takes the modem's downlink out of the
+     * agent's capture with it (measured 2026-11-19 19:12 in one call: the
+     * vendor's uplink mute took `capRMS` from 13 to 1 and back again when it
+     * was switched off).
+     */
+    private fun lateHalParams(): List<String> {
+        val raw = overrideFile("/data/local/tmp/gw_hal_param")
+        val lines = raw.lines().map { it.trim() }
+            .filter { it.contains('=') && !it.startsWith("#") }
+        return if (lines.isEmpty()) profile.halCallParamsLate else lines
+    }
+
+    /**
+     * The live override for the vendor uplink mute, or null when the profile
+     * decides.
+     *
+     * `/data/local/tmp/gw_ul_mute` holds `0` (the microphone goes back into
+     * the call) or `1` (it stays out of it).  It is read through the root
+     * shell: the file lives in a directory the app has no access to.
+     */
+    private fun lateHalOverride(): Boolean? {
+        val v = overrideFile("/data/local/tmp/gw_ul_mute")
+        return when (v) { "0" -> false; "1" -> true; else -> null }
+    }
+
+    /** A file under /data/local/tmp, read through the root shell. */
+    private fun overrideFile(path: String): String = try {
+        RootShell.execForOutput("cat $path 2>/dev/null", timeoutMs = 3000).trim()
+    } catch (e: Exception) { "" }
+
+    /**
+     * A mixer command that reroutes the handset's microphone out of the
+     * cellular uplink without touching the voice path.
+     *
+     * Read from `/data/local/tmp/gw_mic_cmd` (a tinymix command), so the
+     * candidates can be A/B'd on a live call without a rebuild.  The ones
+     * that matter on this chipset are the microphone source muxes
+     * (`VOW_UL_SRC_MUX`, `VOW_AMIC0_MUX`, `DMIC*_MUX`): they decide what the
+     * *modem* hears, while the modem's downlink to the agent is the other leg
+     * of the path and stays where it is.
+     */
+    private fun applyDiagnosticMicCmd() {
+        val cmd = try {
+            RootShell.execForOutput("cat /data/local/tmp/gw_mic_cmd 2>/dev/null", timeoutMs = 3000).trim()
+        } catch (e: Exception) { "" }
+        if (cmd.isEmpty()) return
+        val resolved = DeviceProfile.resolveCmd(cmd)
+        if (resolved.isEmpty()) {
+            Log.w(TAG, "Diagnostic mic command: tinymix not found — '$cmd' not applied")
+            return
+        }
+        Thread({
+            try {
+                val out = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                if (out != lastDiagnosticMicOut) {
+                    lastDiagnosticMicOut = out
+                    Log.i(TAG, "Diagnostic mic command applied: $cmd -> $out")
+                    listener?.onRtpStats("Diagnostic mic command: $cmd -> $out")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Diagnostic mic command failed: ${e.message}")
+            }
+        }, "RTP-MicCmd").start()
+    }
+
+    /**
+     * Silence the handset's own loudspeaker at the output device.
+     *
+     * The caller must not be heard in the room, but every mute of the *voice*
+     * path on this chipset takes the modem's downlink out of the agent's
+     * capture as well (measured 2026-11-19 17:50: the caller's voice was
+     * there right up to the moment the mute was applied and gone afterwards).
+     * The output path is the other way round — muting it silences the
+     * loudspeaker and leaves the modem's voice path alone.
+     *
+     * Three things are muted, because the far end reaches the room through
+     * two of them (measured 2026-11-27 by diffing the whole mixer, idle
+     * against a live call):
+     *
+     * * `RCV Mux` / `LOL Mux` — the codec's analog output muxes;
+     * * `I2S3_CH* HW_SRC_3_OUT_CH*` — the link the HAL opens while the call
+     *   is up to carry the modem's voice to the speaker amplifier.  This is
+     *   the one that matters: with it open the room hears the caller, the
+     *   handset's microphone picks that up again, and the caller hears their
+     *   own voice back;
+     * * `STF_CH* ADDA_UL_CH*` — the sidetone, the room's own voice played
+     *   back locally.
+     *
+     * The capture level from just before goes into the log, so a mute that
+     * did take the capture down with it shows up as the drop it is.
+     */
+    private fun applyHandsetOutputMute(capRmsBefore: Int, repeat: Boolean = false) {
+        val cmd = profile.mixerHandsetOutputMuteCmd
+        if (cmd.isEmpty()) {
+            Log.i(TAG, "Handset output: no output-device mute for ${profile.name}")
+            return
+        }
+        if (!digitalBridgeActive) {
+            Log.i(TAG, "Handset output: skipped — the acoustic bridge needs the loudspeaker")
+            return
+        }
+        val resolved = DeviceProfile.resolveCmd(cmd)
+        if (resolved.isEmpty()) {
+            Log.w(TAG, "Handset output: tinymix not found — cannot silence the loudspeaker")
+            return
+        }
+        Thread({
+            try {
+                val output = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                if (repeat) {
+                    // The HAL rewrites these controls when it programs the call
+                    // path and when it switches the output device, so the
+                    // mute is re-asserted for as long as the call lasts.
+                    Log.d(TAG, "Handset output still muted: $output")
+                    verifyHandsetOutputMute()
+                } else {
+                    Log.i(TAG, "Handset output muted: $output (capRMS before=$capRmsBefore)")
+                    listener?.onRtpStats("Handset output muted (capRMS before=$capRmsBefore): $output")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Handset output mute failed: ${e.message}")
+            }
+        }, "RTP-OutputMute").start()
+    }
+
+    /**
+     * What the output path looks like *now*, without writing to it.
+     *
+     * The mute command reports the value it has just written, and that is
+     * not the value the HAL leaves behind: it re-programs `RCV Mux` and
+     * `LOL Mux` every time it sets the call path up (that is what the
+     * `turnon` paths in `audio_device.xml` do).  So the mute can be written
+     * every fifteen seconds and still be gone half a second later — and the
+     * far end is audible in the room in between.
+     *
+     * Measured 2026-11-24 18:03: the mute was written and re-asserted on
+     * every tick of a four-minute call, and the far end was still audible
+     * from the handset.  A read-back taken *after* the write is what tells
+     * the two cases apart, so it goes into the log every tick.
+     */
+    private fun verifyHandsetOutputMute() {
+        val cmd = profile.mixerHandsetOutputMuteVerifyCmd
+        if (cmd.isEmpty()) return
+        val resolved = DeviceProfile.resolveCmd(cmd)
+        if (resolved.isEmpty()) return
+        Thread({
+            try {
+                val state = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                    .lines().filter { it.contains(':') }
+                    .joinToString(" | ")
+                if (state.isEmpty()) return@Thread
+                val rcvMuted = state.contains("RCV Mux: Open")
+                val lolMuted = state.contains("LOL Mux: Open")
+                // The far end's voice reaches the room through the I2S link,
+                // not through the codec's output muxes — that link has to be
+                // open as well, or the caller is heard in the room and the
+                // microphone hands it straight back.
+                val i2sMuted = state.contains("I2S3_CH1 HW_SRC_3_OUT_CH1: Off")
+                val sidetoneMuted = state.contains("STF_CH1 ADDA_UL_CH1: Off")
+                if (rcvMuted && lolMuted && i2sMuted && sidetoneMuted) {
+                    Log.d(TAG, "Handset output path: $state")
+                } else {
+                    Log.w(TAG, "Handset output path OPEN — the HAL undid the mute: $state")
+                    listener?.onRtpStats("Handset output path was reset by the HAL: $state")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Handset output verification failed: ${e.message}")
+            }
+        }, "RTP-OutputVerify").start()
+    }
+
+    /**
+     * Take the handset's microphone out of the agent's capture.
+     *
+     * The room reaches the agent through the handset's microphone, and the
+     * microphone is analogue: it is amplified and converted before it reaches
+     * the capture.  The caller's voice, on the other hand, is the modem's
+     * downlink and is already digital when it arrives in the CPU.  Cutting the
+     * microphone at the analogue stage therefore takes the room out of the
+     * capture and leaves the caller's voice in it — which is what every other
+     * lever on this chipset could not do: they all cut the *route*, and the
+     * route the microphone shares with the downlink is the one the downlink
+     * arrives on.
+     *
+     * Applied late, because the HAL programs the call path itself and puts
+     * the microphone back when it does.
+     */
+    private fun applyHandsetMicCut(capRmsBefore: Int, repeat: Boolean = false) {
+        val cmd = profile.mixerHandsetMicCutCmd
+        if (cmd.isEmpty()) {
+            Log.i(TAG, "Handset microphone: no analogue cut for ${profile.name}")
+            return
+        }
+        if (!digitalBridgeActive) {
+            Log.i(TAG, "Handset microphone: skipped — the acoustic bridge needs the microphone")
+            return
+        }
+        val resolved = DeviceProfile.resolveCmd(cmd)
+        if (resolved.isEmpty()) {
+            Log.w(TAG, "Handset microphone: tinymix not found — cannot take the room out of the capture")
+            return
+        }
+        Thread({
+            try {
+                val output = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                if (repeat) {
+                    Log.d(TAG, "Handset microphone still cut: $output")
+                    verifyHandsetMicCut()
+                } else {
+                    Log.i(TAG, "Handset microphone cut: $output (capRMS before=$capRmsBefore)")
+                    listener?.onRtpStats("Handset microphone cut (capRMS before=$capRmsBefore): $output")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Handset microphone cut failed: ${e.message}")
+            }
+        }, "RTP-MicCut").start()
+    }
+
+    /**
+     * Whether the microphone is still disconnected, and the cut re-asserted
+     * when it is not.
+     *
+     * The HAL owns this control — it connects the microphone (AIN0) every time
+     * it programs the call path, and it may do so again while the call is up.
+     * A mute that is written once and then silently undone is worse than no
+     * mute at all, because the log says the room is out of the call.
+     */
+    private fun verifyHandsetMicCut() {
+        val cmd = profile.mixerHandsetMicCutVerifyCmd
+        val marker = profile.mixerHandsetMicCutOffMarker
+        if (cmd.isEmpty() || marker.isEmpty()) return
+        val resolved = DeviceProfile.resolveCmd(cmd)
+        if (resolved.isEmpty()) return
+        Thread({
+            try {
+                val state = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                    .lines().filter { it.contains(':') }
+                    .joinToString(" | ")
+                if (state.isEmpty()) return@Thread
+                if (state.contains(marker)) {
+                    Log.d(TAG, "Handset microphone input: $state")
+                } else {
+                    Log.w(TAG, "Handset microphone back in the capture — the HAL undid the cut: $state")
+                    listener?.onRtpStats("Handset microphone back in the capture: $state")
+                    val write = DeviceProfile.resolveCmd(profile.mixerHandsetMicCutCmd)
+                    if (write.isNotEmpty()) {
+                        val out = RootShell.execForOutput(write, timeoutMs = 8000)
+                        Log.w(TAG, "Handset microphone cut re-asserted: $out")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Handset microphone verification failed: ${e.message}")
+            }
+        }, "RTP-MicCutVerify").start()
     }
 
     /**

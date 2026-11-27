@@ -19,6 +19,7 @@ import android.telephony.TelephonyManager
 import android.util.Log
 import com.callagent.gateway.DeviceProfile
 import com.callagent.gateway.RootShell
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * GSM call manager: answers/makes/hangs up GSM calls, tracks state.
@@ -633,7 +634,7 @@ object GsmCallManager {
                     service.setAudioRoute(CallAudioState.ROUTE_SPEAKER)
                 }
 
-                if (profile.silenceLocalAudio) {
+                if (profile.silenceLocalAudio && profile.frameworkMicMuteSafe) {
                     // Mute through Telecom as well as AudioManager.  Telecom
                     // owns the call's mute state and re-applies it whenever the
                     // audio route changes, so an AudioManager-only mute can be
@@ -644,6 +645,13 @@ object GsmCallManager {
                     } catch (e: Exception) {
                         Log.w(TAG, "Telecom setMuted failed: ${e.message}")
                     }
+                } else if (profile.silenceLocalAudio) {
+                    // On this chipset the call mute takes the whole voice path
+                    // down: the agent stops hearing the caller and the caller
+                    // stops hearing the agent, because both ride on it.  The
+                    // microphone is taken out of the cellular uplink by the ALSA
+                    // controls instead (Speech_UL_Mute), which are per-source.
+                    appLog("Telecom mute skipped — it would take the voice path down here")
                 }
 
                 audioManager?.let { am ->
@@ -737,15 +745,28 @@ object GsmCallManager {
             // Digital bridge: silence the handset itself.  Done through
             // AudioManager because it goes via the HAL, unlike the ALSA voice
             // mutes which the HAL overwrites when it programs the call path.
-            try {
-                am.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_MUTE, 0)
-            } catch (_: SecurityException) {}
-            try {
-                am.isMicrophoneMute = true
-            } catch (e: Exception) {
-                Log.w(TAG, "Mic mute failed: ${e.message}")
-            }
-            appLog("Local audio silenced: speaker muted, mic muted (digital only)")
+            //
+            // The voice-call stream is what plays the caller in the earpiece
+            // and the speaker, so muting it takes the handset out of the
+            // conversation on the loudspeaker side.  It is NOT done here: the
+            // mute is applied by [muteLocalVoiceOutput] once the digital
+            // capture is alive, so that a chip where the voice-stream mute
+            // takes the whole voice path down shows up in the log instead of
+            // silently blinding the agent.
+            //
+            // The microphone is not muted through the framework either: on the
+            // MediaTek chipsets that mute takes the voice path down whole
+            // (measured 2026-11-19 17:08 — capture and injection both died).
+            // There the ALSA controls do it per-source (Speech_UL_Mute).
+            //
+            // The injection into the modem's uplink rides on the music
+            // stream, so that stream keeps its own level — it is the agent's
+            // voice to the caller, not the handset's.
+            val maxMusic = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val musicVol = (maxMusic * MUSIC_VOL_PERCENT / 100).coerceAtLeast(1)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, musicVol, 0)
+            val musicNow = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            appLog("Local audio silenced: micMute=via-ALSA(Speech_UL_Mute) music=$musicNow/$maxMusic(target=$musicVol)")
             return
         }
 
@@ -773,6 +794,40 @@ object GsmCallManager {
         val actualMusic = am.getStreamVolume(AudioManager.STREAM_MUSIC)
         val muted = am.isStreamMute(AudioManager.STREAM_VOICE_CALL)
         appLog("Vol: voice=$actualVoice(m=$muted), music=$actualMusic/$maxMusic(target=$musicVol)")
+    }
+
+    /** True once the handset's own loudspeaker has been muted for this call. */
+    private val voiceOutputMuted = AtomicBoolean(false)
+
+    /**
+     * Mute the handset's own loudspeaker: the caller must not be heard in the
+     * room.
+     *
+     * Applied by the RTP session a few seconds into the call, and only after
+     * the digital capture is running.  The order is the point: a framework
+     * mute of the voice path can take the path down with it on some chipsets
+     * (measured 2026-11-19 on the MT6855 — the capture went silent and the
+     * agent stopped hearing the caller), and muting *after* the capture is
+     * alive keeps the two apart.  The log carries the capture level from just
+     * before the mute, so the next statistics line shows whether the capture
+     * survived it.
+     */
+    fun muteLocalVoiceOutput(am: AudioManager, capRmsBefore: Int) {
+        if (!profile.silenceLocalAudio) return
+        if (!profile.frameworkVoiceMuteSafe) {
+            Log.i(TAG, "Local voice output: framework mute not safe on this chipset — skipped")
+            return
+        }
+        if (!voiceOutputMuted.compareAndSet(false, true)) return
+        try {
+            am.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_MUTE, 0)
+            val muted = try { am.isStreamMute(AudioManager.STREAM_VOICE_CALL) } catch (_: Exception) { false }
+            val msg = "Local voice output muted: capRMS before=$capRmsBefore muted=$muted"
+            Log.i(TAG, msg)
+            appLog(msg)
+        } catch (e: Exception) {
+            Log.w(TAG, "Local voice output mute failed: ${e.message}")
+        }
     }
 
     /** Restore audio state when call ends */
@@ -805,6 +860,7 @@ object GsmCallManager {
                     try {
                         try { am.isMicrophoneMute = false } catch (_: Exception) {}
                         am.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_UNMUTE, 0)
+                        voiceOutputMuted.set(false)
                     } catch (_: SecurityException) {}
                     try {
                         val maxVc = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)

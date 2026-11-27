@@ -306,18 +306,243 @@ object MediaTekSpeechMutes {
     const val MODERN_DL = "Speech_DL_Mute"
 
     /**
+     * The mixer control that takes the handset's microphone out of the voice
+     * path.
+     *
+     * `Speech_UL_Mute` mutes the microphone in the *cellular* uplink, so the
+     * room does not reach the caller.  This one mutes it in the *voice* path,
+     * which is where the app's AudioRecord taps the caller — without it the
+     * handset's microphone still ends up in what the agent hears.
+     *
+     * The polarity follows the same convention as the other two (1 = muted);
+     * the command is written with a readback so a build that disagrees shows
+     * up in the log instead of quietly doing the opposite. */
+    const val MODERN_MIC = "Speech_Mic_Mute"
+
+    /**
+     * The mixer control that picks the analogue input of the left PGA — the
+     * preamp the handset's own microphone (AIN0) comes in through.
+     *
+     * `Speech_Mic_Mute` above is the vendor's own mute of the microphone in
+     * the *voice path*: the HAL sets it to `On` by itself when the call is up,
+     * and the room still reaches the agent through it.  This control is one
+     * stage earlier — the microphone is not muted there, it is *not connected*.
+     *
+     * The two legs of the conversation live on different wires at this point:
+     * the caller's voice is the modem's downlink and arrives in the CPU
+     * digitally, while the room is the handset's microphone and has to be
+     * converted and amplified first.  Disconnecting the microphone at the
+     * analogue stage therefore takes the room out of the capture and leaves
+     * the caller's voice alone — the one thing every other lever on this
+     * chipset could not do (measured 2026-11-27 13:10).
+     */
+    const val MODERN_MIC_ANALOG = "PGA_L_Mux"
+
+    /** The value that disconnects the microphone from the preamp. */
+    const val MODERN_MIC_ANALOG_OFF = "None"
+
+    /** The value that connects the built-in microphone (AIN0) to the preamp. */
+    const val MODERN_MIC_ANALOG_ON = "AIN0"
+
+    /**
      * The mixer commands that mute the handset during the call.
      *
-     * `Speech_Mic_Mute` is deliberately left alone: it is the voice-recording
+     * `Speech_Mic_Mute` is deliberately left alone here: it is the voice-recording
      * mute and its polarity differs between builds, so touching it could
-     * mute the agent's own microphone.
+     * mute the agent's own microphone.  The digital bridge writes it
+     * separately, once the HAL has settled — see [modernHandsetMuteCmd].
+     *
+     * `Speech_DL_Mute` is **not** written.  Measured 2026-11-19 17:50: with
+     * the downlink muted in the mixer, the caller's voice did not reach the
+     * agent's capture at all — the control takes the modem's downlink out of
+     * the voice path, not just out of the loudspeaker.  The same goes for the
+     * vendor's own HAL parameter (`Set_SpeechCall_DL_Mute=1`) and for the
+     * framework's voice-stream mute: every mute of the *voice* path on this
+     * chipset takes the downlink with it.  The handset's loudspeaker is
+     * silenced at the **output device** instead — see
+     * [modernOutputMuteCmd].
      */
     fun modernSetupCmd(): String =
-        "tinymix '$MODERN_UL' 1 2>/dev/null; tinymix '$MODERN_DL' 1 2>/dev/null"
+        "tinymix '$MODERN_UL' 1 2>/dev/null"
 
     /** The mixer commands that give the handset back its voice. */
     fun modernRestoreCmd(): String =
-        "tinymix '$MODERN_UL' 0 2>/dev/null; tinymix '$MODERN_DL' 0 2>/dev/null"
+        "tinymix '$MODERN_UL' 0 2>/dev/null; " +
+            "tinymix '$MODERN_DL' 0 2>/dev/null; " +
+            "tinymix '$MODERN_MIC' 0 2>/dev/null; " +
+            "tinymix '$MODERN_I2S_VOICE_CH1' 0 2>/dev/null; " +
+            "tinymix '$MODERN_I2S_VOICE_CH2' 0 2>/dev/null; " +
+            "tinymix '$MODERN_SIDETONE_CH1' 0 2>/dev/null; " +
+            "tinymix '$MODERN_SIDETONE_CH2' 0 2>/dev/null; " +
+            // The microphone is given back connected rather than in the
+            // device's own idle state: leaving it disconnected would be a
+            // dead microphone if the HAL did not program it again for the
+            // next call, and a connected microphone costs nothing while no
+            // call is up.
+            "tinymix '$MODERN_MIC_ANALOG' $MODERN_MIC_ANALOG_ON 2>/dev/null"
+
+    /**
+     * Disconnect the handset's microphone from the analogue preamp.
+     *
+     * Applied late — the HAL puts the microphone back (AIN0) when it programs
+     * the call path — and with a readback, so a build that does not have the
+     * control shows up in the log instead of quietly doing nothing.
+     */
+    fun modernMicCutCmd(): String =
+        "tinymix '$MODERN_MIC_ANALOG' $MODERN_MIC_ANALOG_OFF 2>/dev/null; " +
+            "echo '$MODERN_MIC_ANALOG:'; tinymix '$MODERN_MIC_ANALOG' 2>/dev/null"
+
+    /** The microphone input as it is *now*, without writing anything. */
+    fun modernMicCutVerifyCmd(): String =
+        "echo '$MODERN_MIC_ANALOG:'; tinymix '$MODERN_MIC_ANALOG' 2>/dev/null"
+
+    /**
+     * The commands that take the handset out of the call for good: the
+     * cellular uplink (the room does not reach the caller) and the voice path
+     * (the room does not reach the agent either).
+     *
+     * Written after the HAL has programmed the call path, because the HAL
+     * rewrites the voice mutes when it does — a mute written before that is
+     * discarded, which is exactly why the handset ended up in the call.
+     *
+     * The downlink is deliberately **not** muted here: that control takes the
+     * modem's downlink out of the voice path, and with it the caller's voice
+     * out of the agent's capture (measured 2026-11-19 17:50).  The handset's
+     * loudspeaker is silenced at the output device instead — see
+     * [modernOutputMuteCmd]. */
+    fun modernHandsetMuteCmd(): String =
+        "tinymix '$MODERN_UL' 1 2>/dev/null; tinymix '$MODERN_MIC' 1 2>/dev/null"
+
+    /**
+     * The same commands with a readback of the controls, so the log
+     * shows what the mixer actually holds instead of what was asked for.
+     *
+     * The bare 'tinymix' is resolved to the full path by
+     * [DeviceProfile.resolveCmd], which replaces every occurrence. */
+    fun modernHandsetMuteCmdWithReadback(): String =
+        "tinymix '$MODERN_UL' 1 2>/dev/null; tinymix '$MODERN_MIC' 1 2>/dev/null; " +
+            "echo 'Speech_UL_Mute:'; tinymix '$MODERN_UL' 2>/dev/null; " +
+            "echo 'Speech_Mic_Mute:'; tinymix '$MODERN_MIC' 2>/dev/null"
+
+    /**
+     * The handset's loudspeaker, muted at the output device.
+     *
+     * This is the one mute that cannot hurt the bridge: `RCV Mux` and
+     * `LOL Mux` are the codec's receiver and speaker paths — the place where
+     * the caller's voice leaves the phone — and not the voice path the agent
+     * captures from.  `/vendor/etc/audio_device.xml` shows what the HAL does
+     * with them:
+     *
+     * ```xml
+     * <path name="receiver_output" value="turnon">
+     *     <kctl name="RCV Mux" value="Voice Playback" />   ← абонент в ухе
+     * <path name="receiver_output" value="turnoff">
+     *     <kctl name="RCV Mux" value="Open" />              ← тишина
+     * <path name="dual_speaker_output" value="turnon">
+     *     <kctl name="LOL Mux" value="Playback" />          ← абонент в динамике
+     * ```
+     *
+     * So the same control that carries the caller's voice out of the phone
+     * carries it out of silence when set to `Open` — and the modem's voice
+     * path, which the agent reads, is not touched.
+     *
+     * Applied late, once the route has settled: the HAL rewrites these
+     * controls when it programs the call path and when it switches the
+     * output device.
+     */
+    fun modernOutputMuteCmd(): String =
+        "tinymix '$MODERN_RCV_MUX' Open 2>/dev/null; tinymix '$MODERN_LOL_MUX' Open 2>/dev/null"
+
+    /** The same with a readback, so the log shows what the mixer holds. */
+    fun modernOutputMuteCmdWithReadback(): String =
+        "tinymix '$MODERN_RCV_MUX' Open 2>/dev/null; tinymix '$MODERN_LOL_MUX' Open 2>/dev/null; " +
+            "tinymix '$MODERN_I2S_VOICE_CH1' 0 2>/dev/null; tinymix '$MODERN_I2S_VOICE_CH2' 0 2>/dev/null; " +
+            "tinymix '$MODERN_SIDETONE_CH1' 0 2>/dev/null; tinymix '$MODERN_SIDETONE_CH2' 0 2>/dev/null; " +
+            "echo '$MODERN_RCV_MUX:'; tinymix '$MODERN_RCV_MUX' 2>/dev/null; " +
+            "echo '$MODERN_LOL_MUX:'; tinymix '$MODERN_LOL_MUX' 2>/dev/null; " +
+            "echo '$MODERN_I2S_VOICE_CH1:'; tinymix '$MODERN_I2S_VOICE_CH1' 2>/dev/null; " +
+            "echo '$MODERN_SIDETONE_CH1:'; tinymix '$MODERN_SIDETONE_CH1' 2>/dev/null"
+
+    /**
+     * The output path as it is *now*, without writing anything.
+     *
+     * The codec's DAC input mux and the two output muxes are what decide
+     * whether the caller is audible in the room; the HAL rewrites them when
+     * it programs the call path, so the only honest answer comes from a
+     * read-back taken after the write.
+     */
+    fun modernOutputMuteVerifyCmd(): String =
+        "echo '$MODERN_RCV_MUX:'; tinymix '$MODERN_RCV_MUX' 2>/dev/null; " +
+            "echo '$MODERN_LOL_MUX:'; tinymix '$MODERN_LOL_MUX' 2>/dev/null; " +
+            "echo 'DAC In Mux:'; tinymix 'DAC In Mux' 2>/dev/null; " +
+            "echo 'Handset Volume:'; tinymix 'Handset Volume' 2>/dev/null; " +
+            "echo '$MODERN_I2S_VOICE_CH1:'; tinymix '$MODERN_I2S_VOICE_CH1' 2>/dev/null; " +
+            "echo '$MODERN_I2S_VOICE_CH2:'; tinymix '$MODERN_I2S_VOICE_CH2' 2>/dev/null; " +
+            "echo '$MODERN_SIDETONE_CH1:'; tinymix '$MODERN_SIDETONE_CH1' 2>/dev/null; " +
+            "echo '$MODERN_SIDETONE_CH2:'; tinymix '$MODERN_SIDETONE_CH2' 2>/dev/null"
+
+    /** The codec's receiver path — the earpiece. */
+    const val MODERN_RCV_MUX = "RCV Mux"
+
+    /** The codec's speaker path — the loudspeaker. */
+    const val MODERN_LOL_MUX = "LOL Mux"
+
+    /**
+     * The modem's voice on its way to the speaker amplifier.
+     *
+     * Measured 2026-11-27 by diffing the whole mixer, idle against a live
+     * call: the HAL opens exactly this chain while the call is up —
+     *
+     * ```
+     * PCM_2_CAP → HW_SRC_3 → I2S3 → усилитель (профиль Receiver)
+     * ```
+     *
+     * and closes it again when the call ends.  `RCV Mux` and `LOL Mux` do
+     * **not** gate it: they are the codec's analog output muxes, and the
+     * voice of the far end reaches the room through the I2S link.  With that
+     * link open the room hears the caller, the handset's microphone picks it
+     * up again, and the caller hears their own voice back — the "extra call"
+     * that made the gateway unpleasant to sit next to.
+     */
+    const val MODERN_I2S_VOICE_CH1 = "I2S3_CH1 HW_SRC_3_OUT_CH1"
+    const val MODERN_I2S_VOICE_CH2 = "I2S3_CH2 HW_SRC_3_OUT_CH2"
+
+    /**
+     * The sidetone: the handset's own microphone played back locally.
+     *
+     * The same diff shows the HAL opening `STF_CH1/CH2 ADDA_UL_CH*` for the
+     * duration of the call — the room's own voice in the earpiece, which the
+     * microphone then picks up a second time.
+     */
+    const val MODERN_SIDETONE_CH1 = "STF_CH1 ADDA_UL_CH1"
+    const val MODERN_SIDETONE_CH2 = "STF_CH2 ADDA_UL_CH2"
+
+    /**
+     * The vendor's own uplink mute, as a HAL parameter.
+     *
+     * The mixer control `Speech_UL_Mute` does not take the handset's
+     * microphone out of the cellular uplink on this build — measured
+     * 2026-11-19 18:03: it was written and read back as `On`, and the
+     * microphone was still in the call.  The HAL keeps the real mute state
+     * itself (`mMicMute`, `mUplinkMuteOn`, `mUplinkSourceMuteOn` in
+     * `audio.primary.mediatek.so`), and only its own parameters change it;
+     * `Set_SpeechCall_UL_Mute` is the key the upstream project uses on
+     * MediaTek for exactly this.
+     *
+     * Applied late, because it may mute the whole uplink rather than the
+     * microphone source — and the agent's voice is injected into that same
+     * uplink (`incall_music_uplink → Telephony Tx`).  If it turns out to take
+     * the injection with it, the log shows the capture level dropping right
+     * after it, and the parameter comes back out.
+     */
+    val MODERN_HAL_LATE_PARAMS = listOf(
+        "Set_SpeechCall_UL_Mute=1",
+    )
+
+    /** The same, undone: the phone gets its microphone back. */
+    val MODERN_HAL_RESTORE_PARAMS = listOf(
+        "Set_SpeechCall_UL_Mute=0",
+    )
 }
 
 /**
@@ -398,8 +623,26 @@ object MediaTekPlanner {
             }
         }
 
-        val injection = bgs ?: incallMusic ?: InjectionMode.ACOUSTIC.also {
-            notes += "no digital injection route found — falling back to speaker and microphone"
+        val injection = when {
+            // The background-sound route depends on a HAL parameter that the
+            // newer generations take without ever confirming it.  Where the
+            // audio policy declares the incall_music route together with a
+            // telephony TX device port, that route is the one to use: it is
+            // declared in the policy file itself, it puts the agent into the
+            // modem's uplink, and it does not need the phone's speaker or
+            // microphone at all.
+            incallMusic != null && caps.bgsParamsConfirmed.not() &&
+                caps.bgsParamResult != BgsParamResult.REJECTED -> {
+                notes += "injection: the background-sound parameters were never confirmed, so " +
+                    "the policy's incall_music route is used instead"
+                incallMusic
+            }
+            bgs != null -> bgs
+            incallMusic != null -> incallMusic
+            else -> {
+                notes += "no digital injection route found — falling back to speaker and microphone"
+                InjectionMode.ACOUSTIC
+            }
         }
 
         val capture = when {

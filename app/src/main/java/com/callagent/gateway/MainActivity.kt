@@ -675,6 +675,11 @@ class MainActivity : AppCompatActivity() {
             prefs.getBoolean("translit_ascii", false)
         findViewById<CheckBox>(R.id.cbCfgCallMonitor).isChecked =
             prefs.getBoolean("call_monitor", false)
+        // The digital bridge is on by default: it is what keeps the gateway
+        // out of the conversation.  The fallback (acoustic loop) is only for
+        // a device whose audio policy has no telephony TX route.
+        findViewById<CheckBox>(R.id.cbCfgDigitalBridge).isChecked =
+            prefs.getBoolean("digital_bridge", true)
         val cbTls = findViewById<CheckBox>(R.id.cbCfgTls)
         val cbSrtp = findViewById<CheckBox>(R.id.cbCfgSrtp)
         cbTls.isChecked = prefs.getBoolean("sip_tls", false)
@@ -787,6 +792,7 @@ class MainActivity : AppCompatActivity() {
         val useStun = findViewById<CheckBox>(R.id.cbCfgUseStun).isChecked
         val translit = findViewById<CheckBox>(R.id.cbCfgTranslit).isChecked
         val callMonitor = findViewById<CheckBox>(R.id.cbCfgCallMonitor).isChecked
+        val digitalBridge = findViewById<CheckBox>(R.id.cbCfgDigitalBridge).isChecked
         val tls = findViewById<CheckBox>(R.id.cbCfgTls).isChecked
         // Stored as asked for, but only ever acted on with TLS — so turning
         // TLS off and on again does not silently lose the audio setting.
@@ -817,6 +823,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("use_stun", useStun)
             .putBoolean("translit_ascii", translit)
             .putBoolean("call_monitor", callMonitor)
+            .putBoolean("digital_bridge", digitalBridge)
             .putBoolean("sip_tls", tls)
             .putBoolean("srtp_enabled", srtp)
             .putString("codec", codec)
@@ -829,6 +836,7 @@ class MainActivity : AppCompatActivity() {
                 "srtp=${if (srtp && tls) "on" else "off"}, " +
                 "ascii=${if (translit) "on" else "off"}, " +
                 "monitor=${if (callMonitor) "on" else "off"}, " +
+                "digital bridge=${if (digitalBridge) "on" else "off"}, " +
                     "agent volume ${if (agentVolStep > 0) "+$agentVolStep" else "$agentVolStep"})"
         )
         Toast.makeText(this, "Saved — reconnecting", Toast.LENGTH_SHORT).show()

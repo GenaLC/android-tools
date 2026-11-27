@@ -48,6 +48,37 @@ data class DeviceProfile(
      *  Voice Rx/Tx Device Mute are re-applied by the HAL when it programs the
      *  voice-call mixer path and had no lasting effect. */
     val silenceLocalAudio: Boolean = false,
+
+    /**
+     * Whether the handset's microphone may be muted through the framework
+     * (`AudioManager.isMicrophoneMute`, and the Telecom call mute).
+     *
+     * On most devices this is the right lever.  On the MediaTek MT6855 it is
+     * not: the same call takes the **whole voice path** down with it, and the
+     * agent's voice rides on that same path.  Measured 2026-11-19 17:08 on
+     * the Cubot X100 — with the framework mic mute on, the VOICE_CALL capture
+     * went silent (`capRMS=0`, the source was retired after 3 s) and the
+     * subscriber heard nothing at all: both directions of the bridge died at
+     * once, while the same build with the voice-stream mute on did silence the
+     * handset's loudspeaker as intended.
+     *
+     * On that chipset the microphone is taken out of the cellular uplink by
+     * the ALSA controls instead (`Speech_UL_Mute`), which are per-source and
+     * leave the digital injection alone.
+     */
+    val frameworkMicMuteSafe: Boolean = true,
+
+    /**
+     * Whether the handset's own loudspeaker may be muted through the framework
+     * (`AudioManager.STREAM_VOICE_CALL`).
+     *
+     * Measured working on the MT6855: the caller stops being heard in the
+     * room, and the digital capture keeps running.  The mute is applied only
+     * once the capture is alive, so that a chip where it takes the voice path
+     * down with it shows up in the log instead of silently killing the agent's
+     * ears.
+     */
+    val frameworkVoiceMuteSafe: Boolean = true,
     /** Start capture before the incall_music playback track is created.
      *  Pixel 4a needs this order (the modem TX path otherwise waits on a
      *  voice path not yet opened -> random one-way calls).  The S4 Mini
@@ -123,6 +154,20 @@ data class DeviceProfile(
 
     /** Parameters that put [halCallParams] back for ordinary phone use. */
     val halCallParamsRestore: List<String> = emptyList(),
+
+    /**
+     * HAL parameters applied a few seconds into the call, once the capture is
+     * running.
+     *
+     * A parameter that takes a whole direction of the bridge down with it
+     * must not go in before the bridge works: the caller's voice was there
+     * right up to the moment the voice-stream mute landed and gone
+     * afterwards (measured 2026-11-19 17:50).  Applied late, the damage —
+     * if there is any — is visible in the log instead of silent, and the
+     * first seconds of the call are known-good.
+     */
+    val halCallParamsLate: List<String> = emptyList(),
+
 
     /** Re-issue Call.answer() while the call is still ringing.
      *
@@ -250,6 +295,96 @@ data class DeviceProfile(
      *  the track's preferred device asks the policy manager for that route
      *  explicitly, which is something only a privileged app can get away with. */
     val playbackToTelephonyTx: Boolean = false,
+
+    /**
+     * The gateway runs as a bridge, not as a participant.
+     *
+     * With the digital bridge on, the agent's audio is routed into the modem's
+     * uplink (the telephony TX device) and the handset's microphone is kept
+     * out of the call.  Without it the bridge is an acoustic loop: the phone's
+     * speaker plays the agent, and the phone's own microphone carries him to
+     * the caller — so the room and the agent's own voice end up in the
+     * conversation, and the caller hears everything near the gateway.
+     *
+     * The switch exists because the two routes are mutually exclusive: with the
+     * microphone muted and no digital injection, the GSM side goes silent.
+     * Settings → "Digital bridge" turns it off to fall back to the acoustic
+     * loop on a device whose policy does not offer the telephony TX route. */
+    val digitalBridge: Boolean = false,
+
+    /**
+     * Mixer commands that take the handset's microphone out of the call.
+     *
+     * Issued once the HAL has programmed the voice path — it rewrites the
+     * voice mutes when it does, so a mute written before that is discarded.
+     * That is why this is separate from [mixerSetupCmd]: it runs at a
+     * different moment, and only while the digital bridge is on. */
+    val mixerHandsetMuteCmd: String = "",
+
+    /**
+     * The mixer command that disconnects the handset's microphone from the
+     * analogue input stage, applied late in the call.
+     *
+     * This is the only mute that takes the room out of the agent's capture
+     * *without* taking the caller's voice with it.  The caller's voice is the
+     * modem's downlink, which is digital and reaches the CPU on its own path;
+     * the room is the handset's microphone, which is analogue and has to walk
+     * through the PGA.  Cutting the microphone at the analogue stage leaves
+     * the digital downlink alone — measured 2026-11-27 13:10: the caller's
+     * voice stayed at 3043 RMS in the capture while the room disappeared from
+     * what the agent hears.
+     *
+     * Every other lever tried on this chipset cuts the *route* (the source
+     * mux, the AIF node the microphone and the downlink share) and takes the
+     * downlink with it, which is why the room was in the agent's capture for
+     * as long as it was.
+     */
+    val mixerHandsetMicCutCmd: String = "",
+
+    /**
+     * A read-only command that reports whether the microphone is still
+     * disconnected.
+     *
+     * The HAL programs the call path itself and puts the microphone back
+     * (AIN0) when it does, so the cut has to be re-asserted and checked for
+     * as long as the call lasts — the same way the output path is.
+     */
+    val mixerHandsetMicCutVerifyCmd: String = "",
+
+    /**
+     * The substring the [mixerHandsetMicCutVerifyCmd] output has to contain
+     * for the microphone to count as disconnected.
+     *
+     * Empty means "this profile does not check the microphone cut".
+     */
+    val mixerHandsetMicCutOffMarker: String = "",
+
+    /**
+     * The mixer command that silences the handset's loudspeaker at the output
+     * device, applied late in the call.
+     *
+     * Kept apart from [mixerHandsetMuteCmd] on purpose: this one runs after
+     * the capture is alive, because it is applied when the audio route has
+     * settled and the HAL has stopped rewriting the controls.  Muting the
+     * output device cannot affect what the agent captures — muting the voice
+     * path can.
+     */
+    val mixerHandsetOutputMuteCmd: String = "",
+
+    /**
+     * A read-only command that reports what the output path really looks
+     * like right now.
+     *
+     * The mute command above returns the value it has just written, which is
+     * not the same thing as the value the HAL leaves behind: the HAL
+     * re-programs the call path and rewrites `RCV Mux` / `LOL Mux` on its
+     * own (that is what `audio_device.xml` does in the `turnon` paths).  A
+     * read-back taken later is the only thing that shows whether the mute
+     * survived — measured 2026-11-24 18:03: the mute was written and
+     * re-asserted every tick, and the far end was still audible from the
+     * handset.
+     */
+    val mixerHandsetOutputMuteVerifyCmd: String = "",
 
     /** Turn incall_music on before the AudioTrack is created, not after.
      *

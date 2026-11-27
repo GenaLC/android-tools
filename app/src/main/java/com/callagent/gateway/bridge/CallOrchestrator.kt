@@ -93,6 +93,22 @@ class CallOrchestrator(
      */
     @Volatile private var gsmStateWatchdog: ScheduledFuture<*>? = null
 
+    /**
+     * The PermissionController kill, and only when no call is up.
+     *
+     * Killing it makes it re-apply the UID-level appop mode, but it also
+     * makes it re-run the permission policy synchronisation — and
+     * ActivityManager kills a package whose runtime permission was revoked
+     * the moment that synchronisation lands.  Measured 2026-11-19 17:43:
+     * the gateway killed itself that way, in the middle of a live call, and
+     * the call died with it.
+     */
+    private fun permissionControllerKill(): String =
+        if (GsmCallManager.activeCall == null) {
+            "killall com.google.android.permissioncontroller 2>/dev/null; " +
+            "killall com.android.permissioncontroller 2>/dev/null; "
+        } else ""
+
     private fun ensureGsmStateWatchdog() {
         if (gsmStateWatchdog?.isCancelled == false) return
         val gen = generation
@@ -1193,14 +1209,12 @@ class CallOrchestrator(
                 "appops set $pkg AUTO_REVOKE_PERMISSIONS_IF_UNUSED ignore 2>&1; " else ""
             val uidFlag = if (Build.VERSION.SDK_INT >= 29) "--uid " else ""
             val result = RootShell.execForOutput(
-                "killall com.google.android.permissioncontroller 2>/dev/null; " +
-                "killall com.android.permissioncontroller 2>/dev/null; " +
+                permissionControllerKill() +
                 "pm grant $pkg android.permission.RECORD_AUDIO 2>&1; " +
                 autoRevoke +
                 "appops set ${uidFlag}$pkg RECORD_AUDIO allow 2>&1; " +
                 "appops set $pkg RECORD_AUDIO allow 2>&1; " +
-                "killall com.google.android.permissioncontroller 2>/dev/null; " +
-                "killall com.android.permissioncontroller 2>/dev/null; " +
+                permissionControllerKill() +
                 "appops get ${uidFlag}$pkg RECORD_AUDIO 2>&1"
             )
             val elapsed = System.currentTimeMillis() - t0
