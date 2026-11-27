@@ -719,3 +719,84 @@ ACK уходит на чужой адрес, PBX ретрансмитит `200 O
 * Работа Cubot'а как обычного телефона после серии звонков шлюза: микрофон
   возвращается (`PGA_L_Mux` = `AIN0` при следующем звонке, HAL программирует
   путь сам), но отдельной проверки «позвонить с Cubot'а вручную» не было.
+
+## 12. Два разных CID в исходящем маршруте (проверено 27.11, 16:10)
+
+В маршруте FreePBX есть **два** независимых поля с CallerID. Их регулярно
+путают — в старой редакции `SCALING.md` они были смешаны, из-за чего схема
+масштабирования была описана неверно.
+
+| Поле GUI | Колонка БД | Что делает | В маршруте 351 |
+|---|---|---|---|
+| **Route CID** (форма маршрута) | `outbound_routes.outcid` | CallerID, который PBX подставляет в исходящий INVITE к шлюзу: рендерится как `Set(TRUNKCIDOVERRIDE=<outcid>)` | `+4915112345678` |
+| **CallerID** в строке dial pattern | `outbound_route_patterns.match_cid` | ограничение маршрута: какие CallerID могут им пользоваться; рендерится как шаблон `_+X./40181` | `40181` |
+
+### Доказательства (сервер, только чтение)
+
+Схема таблиц:
+
+```
+outbound_routes:            route_id, name, outcid, outcid_mode, password,
+                            emergency_route, intracompany_route, mohclass,
+                            time_group_id, dest, time_mode, calendar_id,
+                            calendar_group_id, timezone, notification_on
+outbound_route_patterns:    route_id, match_pattern_prefix,
+                            match_pattern_pass, match_cid, prepend_digits
+```
+
+Живая строка маршрута 351:
+
+```sql
+('351','40181','+4915112345678','','','','','default',NULL,
+ 'app-blackhole,hangup,1','',NULL,NULL,'default','call')
+--  route_id  name  outcid      outcid_mode='' password='' emergency='' intra='' mohclass='default' ...
+('351','','+X.','40181','')   -- match_cid = 40181
+```
+
+Как это превращается в dialplan (`/etc/asterisk/extensions_additional.conf`,
+после `fwconsole reload`):
+
+```ini
+[outrt-351] ; 40181
+exten => _+X./40181,1,Macro(user-callerid,LIMIT,EXTERNAL,)
+exten => _+X./40181,n,ExecIf($["${KEEPCID}"!="TRUE" & ${LEN(${DB(AMPUSER/${AMPUSER}/outboundcid)})}=0 & ${LEN(${TRUNKCIDOVERRIDE})}=0]?Set(TRUNKCIDOVERRIDE=+4915112345678))
+exten => _+X./40181,n,Macro(dialout-trunk,248,${EXTEN},,off)
+```
+
+`/40181` в шаблоне — это `match_cid`; `TRUNKCIDOVERRIDE=+4915112345678` — это
+`outcid`. Код FreePBX, который это рендерит:
+`/var/www/html/admin/modules/core/functions.inc.php` (~строка 2258) и форма
+`views/routing/form.php` (там же поле называется «Route CID», а
+`outcid_mode` — это флажок «Override Extension» со значениями
+`override_extension` / пусто, а не список режимов CID).
+
+### Как это выглядит в CDR
+
+| Нога | src | dst | Канал |
+|---|---|---|---|
+| Входящая GSM→SIP | `+380507127621` (абонент) | `380939104994` (DID шлюза) | `PJSIP/1001-…` |
+| Исходящая SIP→GSM | `+4915112345678` (Route CID = `outcid`) | `+380507127621` | `PJSIP/40181-…` |
+
+### Как шлюз выбирает SIM
+
+`CallOrchestrator` берёт CallerID исходящего INVITE (`sipCall.callerNumber`)
+и передаёт его в `GsmCallManager.makeCall(..., outboundCid = cid)`.
+`findPhoneAccountForCid` сравнивает его со значением «Own number» каждого
+слота SIM (`own_number_slot_N`) и выбирает слот, для которого совпадение
+единственное. Отсюда:
+
+* Route CID (`outcid`) должен совпадать с «Own number» слота — иначе на
+  двух-SIM-телефоне исходящий вызов падает с `503 No Matching SIM`
+  (`GsmCallManager.kt`, ветка `matches.size != 1`). На одном-SIM телефон звонит
+  в любом случае.
+* DID входящего INVITE берётся из того же поля «Own number», а если оно не
+  задано — из номера SIM (`CallOrchestrator.inboundSipDestination`).
+
+Живой пример на Cubot: в приложении `own_number = +4915112345678` (legacy-ключ,
+совпадает с `outcid` маршрута), поле слота не задано, поэтому DID входящего
+INVITE взят с карты SIM — `+380939104994`; именно он стоит в Request-URI.
+
+**Вывод для масштабирования:** на телефон нужно одно число — `own_number`; оно
+же идёт в Route CID маршрута, и его же надо вписать в приложение в поле
+«Own number» слота SIM. Номер агента идёт в `match_cid`. Готовая реализация
+этой схемы на любое число телефонов — в [`100-phones/`](100-phones/).

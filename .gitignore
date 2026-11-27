@@ -38,3 +38,7 @@ build/
 
 # macOS duplicate-file copies ("name 3.zip") produced by a file-sync daemon
 * 3.zip
+
+# Python
+__pycache__/
+*.pyc
