@@ -401,6 +401,32 @@ class CallOrchestrator(
             }
         }
 
+        // The destination named in the settings wins over everything else.
+        //
+        // The number of the SIM card is not a routing key — it is the phone's
+        // own number, and a server that routes by it needs a dialplan entry
+        // for every line, one more thing to write and to keep in step with
+        // the SIMs.  Naming the destination here (the way a GoIP box is told
+        // where to send the call) lets one server rule serve every line, and
+        // the CDR then shows the number the call was actually placed to.
+        val configuredDestination = prefs.getString("inbound_sip_destination", "")?.trim().orEmpty()
+        if (configuredDestination.isNotEmpty()) {
+            when {
+                !InboundDestination.isValid(configuredDestination) ->
+                    Log.w(TAG, "Inbound SIP destination '$configuredDestination' is not a number — " +
+                            "using the SIM's own number")
+                // Our own account would come straight back to us: the server
+                // would see the gateway's own extension and ring it.
+                configuredDestination == sipClient.username ->
+                    Log.w(TAG, "Inbound SIP destination is the gateway's own account — " +
+                            "using the SIM's own number")
+                else -> {
+                    Log.i(TAG, "Inbound SIP destination from settings: $configuredDestination")
+                    return configuredDestination
+                }
+            }
+        }
+
         if (subscription != null) {
             val (subId, slot) = subscription
             val configured = prefs.getString("own_number_slot_$slot", "")?.trim().orEmpty()
@@ -1106,8 +1132,11 @@ class CallOrchestrator(
         listener?.onStateChanged(bridgeState, "Calling Asterisk for $callerNumber")
 
         val rtpPort = allocateRtpPort()
+        val destination = inboundSipDestination(gsmCall)
+        Log.i(TAG, "Inbound flow: placing SIP call for GSM caller $callerNumber " +
+                "($callerName) to $destination")
         val sipCall = sipClient.makeCall(
-            targetExtension = inboundSipDestination(gsmCall),
+            targetExtension = destination,
             localRtpPort = rtpPort,
             callerIdNumber = callerNumber,
             callerIdName = callerName,

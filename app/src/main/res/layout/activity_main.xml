@@ -814,6 +814,18 @@
                             android:textColor="@color/text_hint"
                             android:paddingTop="6dp" />
 
+                        <TextView style="@style/CfgLabel" android:text="Inbound SIP destination" />
+                        <EditText android:id="@+id/etCfgInboundDestination" style="@style/CfgField"
+                            android:hint="40181" android:inputType="phone" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Where an incoming GSM call is sent: the SIP number the server dials. The SIM card's own number is not a routing key — the server would need a dialplan entry for every line. Name the destination here instead, and one server rule serves every line. Leave it empty to keep routing by the SIM's own number."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
                         <CheckBox
                             android:id="@+id/cbCfgAutoAnswerOut"
                             android:layout_width="match_parent"

@@ -692,6 +692,9 @@ class MainActivity : AppCompatActivity() {
             prefs.getBoolean("auto_answer_in", false)
         findViewById<CheckBox>(R.id.cbCfgEarlyMedia).isChecked =
             prefs.getBoolean("early_media", true)
+        findViewById<EditText>(R.id.etCfgInboundDestination).setText(
+            prefs.getString("inbound_sip_destination", "") ?: ""
+        )
         findViewById<EditText>(R.id.etCfgAutoAnswerDelay).setText(
             prefs.getInt("auto_answer_delay_ms",
                 com.callagent.gateway.bridge.AutoAnswerPolicy.DEFAULT_DELAY_MS).toString()
@@ -812,6 +815,8 @@ class MainActivity : AppCompatActivity() {
         val autoAnswerOut = findViewById<CheckBox>(R.id.cbCfgAutoAnswerOut).isChecked
         val autoAnswerIn = findViewById<CheckBox>(R.id.cbCfgAutoAnswerIn).isChecked
         val earlyMedia = findViewById<CheckBox>(R.id.cbCfgEarlyMedia).isChecked
+        val inboundDestination =
+            findViewById<EditText>(R.id.etCfgInboundDestination).text.toString().trim()
         val autoAnswerDelay = com.callagent.gateway.bridge.AutoAnswerPolicy.delayMs(
             findViewById<EditText>(R.id.etCfgAutoAnswerDelay).text.toString().trim().toIntOrNull()
                 ?: com.callagent.gateway.bridge.AutoAnswerPolicy.DEFAULT_DELAY_MS
@@ -850,6 +855,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("auto_answer_out", autoAnswerOut)
             .putBoolean("auto_answer_in", autoAnswerIn)
             .putBoolean("early_media", earlyMedia)
+            .putString("inbound_sip_destination", inboundDestination)
             .putInt("auto_answer_delay_ms", autoAnswerDelay)
             .putBoolean("sip_tls", tls)
             .putBoolean("srtp_enabled", srtp)
@@ -867,6 +873,7 @@ class MainActivity : AppCompatActivity() {
                 "auto-answer out=${if (autoAnswerOut) "on" else "off"}, " +
                 "auto-answer in=${if (autoAnswerIn) "on" else "off"}, " +
                 "early media=${if (earlyMedia) "on" else "off"} (${autoAnswerDelay}ms), " +
+                "inbound SIP=${inboundDestination.ifEmpty { "SIM's own number" }}, " +
                     "agent volume ${if (agentVolStep > 0) "+$agentVolStep" else "$agentVolStep"})"
         )
         Toast.makeText(this, "Saved — reconnecting", Toast.LENGTH_SHORT).show()
