@@ -53,7 +53,18 @@ class RtpSession(
     // G.722 is the default of the configured codec mode, so it is the
     // default here too.  Every call site passes the negotiated payload
     // explicitly; this is only what a session built without one would use.
-    private val payloadType: Int = RtpPacket.PT_G722
+    private val payloadType: Int = RtpPacket.PT_G722,
+    /**
+     * The cellular leg was answered on our own, before the far end did.
+     *
+     * That opens the downlink before the network has anything to say on it,
+     * so the first seconds of the capture are legitimately silent.  Without
+     * this the silence detector reads that silence as a dead source, retires
+     * the capture and falls back to a source that carries the room instead
+     * of the call — which loses the very announcement the early answer was
+     * there to catch.
+     */
+    private val allowSilentStart: Boolean = false
 ) {
     private val running = AtomicBoolean(false)
     /** Ensures the stop callback is delivered once, including a session that
@@ -246,6 +257,18 @@ class RtpSession(
     private val RATE_MIN_PERCENT = 85L
     private val SILENCE_FRAME_LIMIT get() = profile.captureSilenceFrames
 
+    /**
+     * How long an unproven source may stay silent at the start of a call
+     * that was answered early.
+     *
+     * The silence detector answers "does this source deliver audio at all",
+     * and it can only answer that once there was audio to deliver.  On a leg
+     * answered early there is nothing on the downlink yet — the network is
+     * still setting the announcement up — so the silence says nothing about
+     * the source.
+     */
+    private val SILENT_START_GRACE_MS = 10_000L
+
     var listener: Listener? = null
 
     interface Listener {
@@ -295,7 +318,8 @@ class RtpSession(
             loopThread("RTP-Recv-$localPort") { receiveLoop() },
             loopThread("RTP-Play-$localPort") { playbackLoop() },
             loopThread("RTP-Capt-$localPort") { captureInitAndLoop() },
-            loopThread("RTP-Timeout-$localPort") { timeoutLoop() }
+            loopThread("RTP-Timeout-$localPort") { timeoutLoop() },
+            loopThread("RTP-OutMute-$localPort") { outputMuteKeeperLoop() }
         )
         workers.forEach { it.start() }
 
@@ -662,6 +686,18 @@ class RtpSession(
             "playBuf=${grantedFrames}f/${grantedMs}ms (asked=$playBufSize min=$minPlayBuf " +
             "lowLatency=${profile.playbackLowLatency}) ch=$playbackChannels " +
             "capture=${if (capture != null) audioSourceName else "deferred"} profile=${profile.name}")
+
+        // The handset's loudspeaker is closed from the first moment of the
+        // bridge.  It used to wait for the late pass three seconds in, and the
+        // far end's voice was in the room for those three seconds — the
+        // framework's own voice-stream mute cannot close that window here,
+        // because on this chipset it takes the modem's downlink out of the
+        // agent's capture with it.
+        //
+        // This write is best effort: the HAL rewrites these controls when it
+        // programs the call path, which is why the keeper re-asserts them
+        // every few seconds for as long as the call lasts.
+        applyHandsetOutputMute(captureRms)
         return true
     }
 
@@ -1330,6 +1366,19 @@ class RtpSession(
                                     listener?.onRtpStats(msg)
                                 }
                                 silenceFrameCount = 0
+                            } else if (allowSilentStart &&
+                                System.currentTimeMillis() - captureStartMs < SILENT_START_GRACE_MS) {
+                                // The cellular leg was answered early, so the
+                                // downlink was opened before the network had
+                                // anything to say on it.  Silence now means the
+                                // network is quiet, not that the source is
+                                // dead — and retiring it here would drop the
+                                // announcement on the floor and fall back to
+                                // a source that carries the room instead of
+                                // the call.
+                                silenceFrameCount = 0
+                                Log.w(TAG, "Source $audioSourceName silent early in an " +
+                                        "early-answered call — keeping it for now")
                             } else {
                                 return giveUpSource("Source $audioSourceName SILENT ($silenceFrameCount non-echo frames) — trying fallback")
                             }
@@ -1595,6 +1644,9 @@ class RtpSession(
             // The handset's loudspeaker is muted at the output device — the
             // codec's receiver and speaker paths — which is the one mute that
             // cannot take the modem's downlink out of the agent's capture.
+            // This is the late pass: the HAL has programmed the call path by
+            // now, so this write is the one that sticks.  The keeper re-asserts
+            // it every few seconds from here on.
             applyHandsetOutputMute(captureRms)
             // The handset's microphone is disconnected from the analogue stage
             // at the same moment: that is what takes the room out of what the
@@ -1648,12 +1700,6 @@ class RtpSession(
                 // level is what the A/B measurement is made of.
                 applyLateHalCallParams(captureRms)
                 applyDiagnosticMicCmd()
-
-                // Re-assert the output-device mute: the HAL rewrites those
-                // controls when it programs the call path and when it
-                // switches the output device, and the handset must not start
-                // playing the caller in the room again.
-                applyHandsetOutputMute(captureRms, repeat = true)
 
                 // …and the same for the microphone cut: the HAL programs the
                 // call path itself and puts the microphone back when it does,
@@ -2677,6 +2723,20 @@ class RtpSession(
      * did take the capture down with it shows up as the drop it is.
      */
     private fun applyHandsetOutputMute(capRmsBefore: Int, repeat: Boolean = false) {
+        Thread({
+            writeHandsetOutputMute(capRmsBefore, repeat)
+        }, "RTP-OutputMute").start()
+    }
+
+    /**
+     * The write itself, synchronous.
+     *
+     * The keeper calls it inline: it must not start a second write while the
+     * first one is still inside the root shell, or two shells would be writing
+     * the same controls at once and the log would show two different states
+     * for one moment.
+     */
+    private fun writeHandsetOutputMute(capRmsBefore: Int, repeat: Boolean) {
         val cmd = profile.mixerHandsetOutputMuteCmd
         if (cmd.isEmpty()) {
             Log.i(TAG, "Handset output: no output-device mute for ${profile.name}")
@@ -2691,23 +2751,20 @@ class RtpSession(
             Log.w(TAG, "Handset output: tinymix not found — cannot silence the loudspeaker")
             return
         }
-        Thread({
-            try {
-                val output = RootShell.execForOutput(resolved, timeoutMs = 8000)
-                if (repeat) {
-                    // The HAL rewrites these controls when it programs the call
-                    // path and when it switches the output device, so the
-                    // mute is re-asserted for as long as the call lasts.
-                    Log.d(TAG, "Handset output still muted: $output")
-                    verifyHandsetOutputMute()
-                } else {
-                    Log.i(TAG, "Handset output muted: $output (capRMS before=$capRmsBefore)")
-                    listener?.onRtpStats("Handset output muted (capRMS before=$capRmsBefore): $output")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Handset output mute failed: ${e.message}")
+        try {
+            val output = RootShell.execForOutput(resolved, timeoutMs = 8000)
+            if (repeat) {
+                // The HAL rewrites these controls when it programs the call
+                // path and when it switches the output device, so the
+                // mute is re-asserted for as long as the call lasts.
+                Log.d(TAG, "Handset output still muted: $output")
+            } else {
+                Log.i(TAG, "Handset output muted: $output (capRMS before=$capRmsBefore)")
+                listener?.onRtpStats("Handset output muted (capRMS before=$capRmsBefore): $output")
             }
-        }, "RTP-OutputMute").start()
+        } catch (e: Exception) {
+            Log.w(TAG, "Handset output mute failed: ${e.message}")
+        }
     }
 
     /**
@@ -2717,43 +2774,44 @@ class RtpSession(
      * not the value the HAL leaves behind: it re-programs `RCV Mux` and
      * `LOL Mux` every time it sets the call path up (that is what the
      * `turnon` paths in `audio_device.xml` do).  So the mute can be written
-     * every fifteen seconds and still be gone half a second later — and the
+     * every few seconds and still be gone half a second later — and the
      * far end is audible in the room in between.
      *
      * Measured 2026-11-24 18:03: the mute was written and re-asserted on
      * every tick of a four-minute call, and the far end was still audible
      * from the handset.  A read-back taken *after* the write is what tells
-     * the two cases apart, so it goes into the log every tick.
+     * the two cases apart, so the keeper takes one every few passes.
+     *
+     * Synchronous: the keeper runs it inline, so that the state it checks is
+     * the state of the path at that moment.
      */
-    private fun verifyHandsetOutputMute() {
+    private fun readHandsetOutputMute() {
         val cmd = profile.mixerHandsetOutputMuteVerifyCmd
         if (cmd.isEmpty()) return
         val resolved = DeviceProfile.resolveCmd(cmd)
         if (resolved.isEmpty()) return
-        Thread({
-            try {
-                val state = RootShell.execForOutput(resolved, timeoutMs = 8000)
-                    .lines().filter { it.contains(':') }
-                    .joinToString(" | ")
-                if (state.isEmpty()) return@Thread
-                val rcvMuted = state.contains("RCV Mux: Open")
-                val lolMuted = state.contains("LOL Mux: Open")
-                // The far end's voice reaches the room through the I2S link,
-                // not through the codec's output muxes — that link has to be
-                // open as well, or the caller is heard in the room and the
-                // microphone hands it straight back.
-                val i2sMuted = state.contains("I2S3_CH1 HW_SRC_3_OUT_CH1: Off")
-                val sidetoneMuted = state.contains("STF_CH1 ADDA_UL_CH1: Off")
-                if (rcvMuted && lolMuted && i2sMuted && sidetoneMuted) {
-                    Log.d(TAG, "Handset output path: $state")
-                } else {
-                    Log.w(TAG, "Handset output path OPEN — the HAL undid the mute: $state")
-                    listener?.onRtpStats("Handset output path was reset by the HAL: $state")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Handset output verification failed: ${e.message}")
+        try {
+            val state = RootShell.execForOutput(resolved, timeoutMs = 8000)
+                .lines().filter { it.contains(':') }
+                .joinToString(" | ")
+            if (state.isEmpty()) return
+            val rcvMuted = state.contains("RCV Mux: Open")
+            val lolMuted = state.contains("LOL Mux: Open")
+            // The far end's voice reaches the room through the I2S link,
+            // not through the codec's output muxes — that link has to be
+            // open as well, or the caller is heard in the room and the
+            // microphone hands it straight back.
+            val i2sMuted = state.contains("I2S3_CH1 HW_SRC_3_OUT_CH1: Off")
+            val sidetoneMuted = state.contains("STF_CH1 ADDA_UL_CH1: Off")
+            if (rcvMuted && lolMuted && i2sMuted && sidetoneMuted) {
+                Log.d(TAG, "Handset output path: $state")
+            } else {
+                Log.w(TAG, "Handset output path OPEN — the HAL undid the mute: $state")
+                listener?.onRtpStats("Handset output path was reset by the HAL: $state")
             }
-        }, "RTP-OutputVerify").start()
+        } catch (e: Exception) {
+            Log.w(TAG, "Handset output verification failed: ${e.message}")
+        }
     }
 
     /**
@@ -2804,7 +2862,77 @@ class RtpSession(
     }
 
     /**
-     * Whether the microphone is still disconnected, and the cut re-asserted
+     * Keep the handset's loudspeaker closed for as long as the call lasts.
+     *
+     * The HAL owns these controls: it rewrites `RCV Mux`, `LOL Mux` and the
+     * I2S link every time it programs the call path and every time it switches
+     * the output device.  A mute written once is undone within a second, and
+     * until the next write the far end's voice is in the room — measured on
+     * 2026-11-24, when the mute was re-asserted on every tick of a
+     * four-minute call and the far end was still audible from the handset.
+     *
+     * The write used to ride on the statistics tick, which runs every fifteen
+     * seconds: the room could hear the far end for a quarter of a minute at a
+     * time.  This keeper writes every [OutputMuteCadence.INTERVAL_MS] instead,
+     * and reads the controls back every [OutputMuteCadence.VERIFY_EVERY]
+     * passes so a HAL that undoes the mute still shows up in the log.
+     *
+     * The microphone cut is not here: the HAL only reconnects the microphone
+     * when it programs the call path, and the statistics tick re-asserts that
+     * one often enough.
+     */
+    private fun outputMuteKeeperLoop() {
+        var pass = 0
+        var reported = ""
+        Log.i(TAG, "Handset output keeper: every ${OutputMuteCadence.INTERVAL_MS} ms")
+        while (running.get()) {
+            try {
+                Thread.sleep(OutputMuteCadence.INTERVAL_MS)
+            } catch (_: InterruptedException) {
+                return
+            }
+            if (!running.get()) return
+            pass++
+
+            // Why the mute cannot be written right now — if it cannot be
+            // written at all, the reason is said once and the keeper keeps
+            // trying: tinymix can appear later (the module copies it into
+            // /data/local/tmp on late start), and a keeper that gave up would
+            // leave the handset in the conversation for the rest of the call.
+            val reason = outputMuteUnavailableReason()
+            if (reason != null) {
+                if (reason != reported) {
+                    reported = reason
+                    Log.i(TAG, "Handset output keeper: $reason")
+                }
+                continue
+            }
+            reported = ""
+
+            writeHandsetOutputMute(captureRms, repeat = true)
+            if (OutputMuteCadence.shouldVerify(pass)) readHandsetOutputMute()
+        }
+    }
+
+    /**
+     * Why the output mute cannot be applied right now, or null when it can.
+     *
+     * An empty command means the profile was built without an output mute at
+     * all — the mixer was not readable when the device was probed — and that
+     * does not change while the call lasts.  A missing tinymix can.
+     */
+    private fun outputMuteUnavailableReason(): String? = when {
+        profile.mixerHandsetOutputMuteCmd.isEmpty() ->
+            "no output-device mute for ${profile.name} — nothing to keep closed"
+        !digitalBridgeActive ->
+            "the acoustic bridge needs the loudspeaker"
+        DeviceProfile.resolveCmd(profile.mixerHandsetOutputMuteCmd).isEmpty() ->
+            "tinymix not found yet"
+        else -> null
+    }
+
+    /**
+     * Whether the handset's microphone is still disconnected, and the cut re-asserted
      * when it is not.
      *
      * The HAL owns this control — it connects the microphone (AIN0) every time
