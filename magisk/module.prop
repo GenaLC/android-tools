@@ -1,6 +1,6 @@
 id=sip-gsm-gateway
 name=Device Tools Permissions
-version=v1.4.27
-versionCode=466
+version=v1.4.28
+versionCode=467
 author=callagent
 description=Priv-app permissions (CAPTURE_AUDIO_OUTPUT, MODIFY_PHONE_STATE), auto-grant runtime permissions, audio routing config for Device Tools

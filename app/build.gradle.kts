@@ -15,8 +15,8 @@ android {
         // service/Compat.kt and service/GatewayService.kt.
         minSdk = 24
         targetSdk = 35
-        versionCode = 466
-        versionName = "1.4.27"
+        versionCode = 467
+        versionName = "1.4.28"
     }
 
     // A release build is signed with the same debug key the debug build uses.

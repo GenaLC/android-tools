@@ -1590,3 +1590,46 @@ Update: v1.4.27 installed over the running build
 ```
 Synced updated APK from /data/app/~~…/base.apk (reboot needed for priv-app refresh)
 ```
+
+### 25.7 Проверка самообновления (v1.4.28)
+
+v1.4.28 собрана **только для проверки**: код тот же, что в v1.4.27, —
+изменены номер версии и versionCode. Нужна как «триггер»: телефон должен
+найти её сам.
+
+Порядок:
+
+1. На Cubot поставить модуль **v1.4.27** (в нём уже есть функция
+   обновления) и перезагрузить. Без этого шага телефон не умеет обновляться
+   сам и v1.4.28 придётся ставить вручную.
+2. Дальше ничего делать не нужно: при старте шлюза приложение спросит ленту
+   релизов, найдёт v1.4.28 и поставит её.
+
+Что должно быть видно в журнале приложения:
+
+```
+Update: v1.4.28 is newer than 1.4.27
+Update: downloading v1.4.28 (5183 KB)
+Update: downloaded 5183 KB
+Update: v1.4.28 installed over the running build
+[v1.4.28] SIP client started, registering with …      ← процесс перезапущен
+```
+
+После перезагрузки в журнале Magisk:
+
+```
+Synced updated APK from /data/app/~~…/base.apk (reboot needed for priv-app refresh)
+```
+
+— это значит, что база priv-app в оверлее модуля приведена в соответствие с
+новой версией.
+
+Если в журнале вместо этого:
+
+```
+Update: the release feed could not be read (…)        ← нет сети или feed не отвечает
+Update: v1.4.28 failed: …                             ← отказ, с причиной в тексте
+Update: refused — the build is signed with another key  ← подпись не та
+```
+
+— то причина в тексте, а не в телефоне.
