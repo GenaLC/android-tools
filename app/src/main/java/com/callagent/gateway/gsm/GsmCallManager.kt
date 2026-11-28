@@ -240,8 +240,13 @@ object GsmCallManager {
 
     // ── Call control ────────────────────────────────────
 
-    /** Answer a ringing GSM call */
-    fun answerCall(call: Call? = activeCall) {
+    /** Answer a ringing GSM call.
+     *
+     *  [retry] asks again while the call has not come up yet.  The early
+     *  answer of a call the phone placed itself needs it even on profiles
+     *  that do not retry by default: it lands before the network has set the
+     *  channel up, and one attempt is one attempt. */
+    fun answerCall(call: Call? = activeCall, retry: Boolean = profile.answerRetry) {
         call?.let {
             // An active call cannot be answered again: the auto-answer may
             // have got there first, and the SIP side answering afterwards
@@ -258,7 +263,7 @@ object GsmCallManager {
             appLog("GSM: answering the cellular leg now")
             try {
                 it.answer(it.details.videoState)
-                if (profile.answerRetry) retryAnswerWhileRinging(it, 1)
+                if (retry) retryAnswerWhileRinging(it, 1)
             } catch (e: Exception) {
                 // Answering a call this phone placed itself is not an ordinary
                 // operation: the telephony stack may refuse it, and the
@@ -276,25 +281,32 @@ object GsmCallManager {
     private const val ANSWER_RETRY_MAX = 20
 
     /**
-     * Ask again while the call is still ringing (profiles with
+     * Ask again while the call has not come up yet (profiles with
      * [DeviceProfile.answerRetry] only).
      *
      * The SIP side can answer before the modem is ready for it: the Ulefone
-     * Metal (MediaTek) sends its first RING ~1.6 s after the incoming-call
-     * notification and an ATA before that returns `+CME ERROR: 604`.  The
-     * call then just keeps ringing for the caller; the gateway used to ask
-     * once and never again.
+     * Metal (MediaTek) sends its first RING ~1.6 s after the call appears
+     * and answers ATA with `+CME ERROR: 604` before that.  The call then
+     * just keeps ringing for the caller; the gateway used to ask once and
+     * never again.
      *
      * A retry sent after the modem has already accepted the answer, but before
      * Telecom reports ACTIVE, makes one more ATA that the modem rejects (604) —
      * harmless, and it stops as soon as the call is no longer ringing.
+     *
+     * The retry covers every state before the call is up, not just RINGING:
+     * an outgoing call the phone placed itself never enters RINGING — it goes
+     * DIALING → CONNECTING → ACTIVE — so the early answer of that call had
+     * exactly one chance to land, and it landed before the network had set the
+     * channel up.
      */
     private fun retryAnswerWhileRinging(call: Call, attempt: Int) {
         if (attempt > ANSWER_RETRY_MAX) return
         Handler(Looper.getMainLooper()).postDelayed({
             try {
-                if (call.state == Call.STATE_RINGING) {
-                    Log.i(TAG, "GSM call still ringing — answering again ($attempt/$ANSWER_RETRY_MAX)")
+                if (!GsmCallStates.isUpYet(call.state)) {
+                    Log.i(TAG, "GSM call not up yet (state=${call.state}) — answering again " +
+                            "($attempt/$ANSWER_RETRY_MAX)")
                     call.answer(call.details.videoState)
                     retryAnswerWhileRinging(call, attempt + 1)
                 }
@@ -303,6 +315,7 @@ object GsmCallManager {
             }
         }, ANSWER_RETRY_DELAY_MS)
     }
+
 
     /** Reject a ringing GSM call */
     fun rejectCall(call: Call? = activeCall) {

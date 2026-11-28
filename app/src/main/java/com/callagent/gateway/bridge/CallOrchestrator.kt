@@ -743,7 +743,10 @@ class CallOrchestrator(
         Log.i(TAG, "Answering the cellular leg now (auto-answer) — " +
                 "the operator's announcement becomes audible")
         gsmAutoAnswered = true
-        GsmCallManager.answerCall(call)
+        // The retry is forced on: this answer lands before the network has
+        // set the channel up, and one attempt at the wrong moment is one
+        // attempt too few.
+        GsmCallManager.answerCall(call, retry = true)
     }
 
     /** GSM call is now active (answered) */
@@ -815,46 +818,31 @@ class CallOrchestrator(
                     Thread({
                         try {
                             activeSipCall?.let { sipCall ->
-                                val rtpPort = allocateRtpPort()
+                                // The port was named in the 183, so the media
+                                // that is already running and the media the
+                                // answer describes are one stream.
+                                val rtpPort = sipCall.localRtpPort.takeIf { it > 0 }
+                                    ?: allocateRtpPort()
                                 sipCall.listener = this
                                 val addr = sipCall.remoteRtpAddress ?: sipClient.serverDomain
                                 val port = sipCall.remoteRtpPort
                                 val pt = sipCall.negotiatedPayloadType
 
-                                // The early answer tells the server that the
-                                // media path is up while the call is still
-                                // ringing there.
-                                val early = earlyMediaEnabled() && port > 0 &&
-                                        sipCall.answerEarly(rtpPort)
-                                if (early) {
-                                    Log.i(TAG, "Early media offered to the server " +
-                                            "(183 + SDP), port=$rtpPort")
-                                    earlyMediaSent = true
-                                }
-
-                                if (early) {
-                                    // Media first, answer second: the
-                                    // operator's announcement then reaches the
-                                    // agent from its first frame instead of
-                                    // into silence.
+                                // The early media may already be carrying the
+                                // stream; then there is nothing left to start,
+                                // only the call to answer.
+                                if (activeRtpSession == null && port > 0) {
                                     try {
-                                        startRtp(rtpPort, addr, port, pt)
+                                        ensureRtp(rtpPort, addr, port, pt)
                                     } catch (t: Throwable) {
                                         Log.e(TAG, "RTP setup failed: $t", t)
                                         listener?.onError("RTP: ${t.javaClass.simpleName}")
                                     }
-                                    sipCall.accept(rtpPort)
-                                } else {
-                                    sipCall.accept(rtpPort)
-                                    if (port > 0) {
-                                        try {
-                                            startRtp(rtpPort, addr, port, pt)
-                                        } catch (t: Throwable) {
-                                            Log.e(TAG, "RTP setup failed: $t", t)
-                                            listener?.onError("RTP: ${t.javaClass.simpleName}")
-                                        }
-                                    }
+                                } else if (activeRtpSession != null) {
+                                    Log.i(TAG, "Early media is already carrying the stream — " +
+                                            "answering the call")
                                 }
+                                sipCall.accept(rtpPort)
                             }
                             Log.i(TAG, "Outbound bridge established")
                         } catch (t: Throwable) {
@@ -1015,12 +1003,13 @@ class CallOrchestrator(
      * same time; two sessions would mean two capture streams and two audio
      * routes on one call.
      */
-    private fun ensureRtp(localPort: Int, addr: String, port: Int, pt: Int) {
+    private fun ensureRtp(localPort: Int, addr: String, port: Int, pt: Int,
+                          allowSilentStart: Boolean = gsmAutoAnswered) {
         if (activeRtpSession != null) {
             Log.i(TAG, "RTP session already running — keeping it")
             return
         }
-        startRtp(localPort, addr, port, pt)
+        startRtp(localPort, addr, port, pt, allowSilentStart)
     }
 
     override fun onRtpReady(call: SipCall, remoteRtpAddr: String, remoteRtpPort: Int, payloadType: Int) {
@@ -1148,10 +1137,28 @@ class CallOrchestrator(
         activeSipCall = sipCall
         listener?.onStateChanged(bridgeState, "Dialing $gsmDestination")
 
-        // Send 180 Ringing to SIP caller while GSM dials
-        sipCall.originalInvite?.let { invite ->
-            val ringing = com.callagent.gateway.sip.SipBuilder.ringing180(invite, sipCall.localTag)
-            sipClient.sendTo(ringing, sipCall.responseTarget())
+        // The server is told the media path is up right away: 183 with our own
+        // SDP instead of a bare 180.  The server bridges early media to the
+        // agent, so the cellular side reaches the agent while the agent's
+        // phone is still ringing — which is the whole point: the operator's
+        // announcement is played before anybody picks up.
+        val rtpPort = try {
+            allocateRtpPort()
+        } catch (e: Exception) {
+            Log.e(TAG, "No RTP port for the early media: ${e.message}")
+            tearDown("No free RTP port")
+            return
+        }
+        val early = earlyMediaEnabled() && sipCall.answerEarly(rtpPort)
+        if (early) {
+            earlyMediaSent = true
+            Log.i(TAG, "Early media offered to the server (183 + SDP), port=$rtpPort")
+        } else {
+            // No early media: a plain 180 while the cellular side dials.
+            sipCall.originalInvite?.let { invite ->
+                val ringing = com.callagent.gateway.sip.SipBuilder.ringing180(invite, sipCall.localTag)
+                sipClient.sendTo(ringing, sipCall.responseTarget())
+            }
         }
 
         // Dial via the SIM whose configured own number matches the SIP
@@ -1165,6 +1172,13 @@ class CallOrchestrator(
             tearDown("No matching SIM for Outbound CID", 503 to "No Matching SIM")
             return
         }
+
+        // The RTP session does NOT go up with the 183.  It is put up when the
+        // cellular leg comes up, because the HAL rewrites the voice path when
+        // it programs the call — the incall-music setup written before that
+        // is gone with it, and the agent's voice would never reach the
+        // caller.  The port named in the 183 is the one the session binds, so
+        // the early media and the answer are one stream.
 
         // The cellular network says things of its own before the far end
         // picks up — "this number is not available", a billing prompt, a queue
@@ -1184,7 +1198,8 @@ class CallOrchestrator(
     // ── RTP ─────────────────────────────────────────────
 
     private fun startRtp(localPort: Int, remoteAddr: String, remotePort: Int,
-                         payloadType: Int = RtpPacket.PT_G722) {
+                         payloadType: Int = RtpPacket.PT_G722,
+                         allowSilentStart: Boolean = gsmAutoAnswered) {
         // Not @Synchronized, deliberately: tearDown() is, and it is reached
         // from the Telecom callback on the main thread, so sharing a monitor
         // with this method — which blocks for as long as AudioRecord takes to
@@ -1222,7 +1237,9 @@ class CallOrchestrator(
             // A leg we answered ourselves opens the downlink before the
             // network has anything to say on it: the silence at the start of
             // that capture is the network being quiet, not a dead source.
-            allowSilentStart = gsmAutoAnswered
+            // The same goes for the early media, whose capture runs before
+            // the cellular leg is up at all.
+            allowSilentStart = allowSilentStart
         )
 
         // DTMF from the SIP side → the GSM call, so IVR menus work.  Accept
