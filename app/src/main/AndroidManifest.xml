@@ -156,5 +156,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- Hands a downloaded build to the system installer, for the case
+             where there is no root to put it over the running one. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.update"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
+
     </application>
 </manifest>

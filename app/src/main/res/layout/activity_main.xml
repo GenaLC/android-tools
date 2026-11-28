@@ -592,6 +592,52 @@
                             android:paddingTop="2dp"
                             android:paddingBottom="14dp" />
 
+                        <!-- Update -->
+                        <!--
+                            The gateway asks the release feed on its own at
+                            start-up; this is where the operator sees what
+                            that found and asks again by hand.
+                        -->
+                        <TextView
+                            android:id="@+id/tvCfgUpdate"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_horizontal"
+                            android:text=""
+                            android:textSize="12sp"
+                            android:textColor="@color/text_secondary"
+                            android:paddingBottom="8dp" />
+
+                        <Button
+                            android:id="@+id/btnCfgCheckUpdate"
+                            android:layout_width="match_parent"
+                            android:layout_height="46dp"
+                            android:text="Check for updates"
+                            android:textSize="13sp"
+                            android:textColor="@color/text_primary"
+                            android:backgroundTint="@color/btn_secondary"
+                            android:minHeight="0dp"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <CheckBox
+                            android:id="@+id/cbCfgAutoUpdate"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Install a newer build on its own"
+                            android:buttonTint="@color/accent"
+                            android:textColor="@color/text_label"
+                            android:layout_marginTop="12dp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="The gateway asks the release feed at start-up. A newer build is downloaded, checked against the one running — same application, same signing key — and put over it. The phone restarts the app afterwards."
+                            android:textSize="11sp"
+                            android:textColor="@color/text_secondary"
+                            android:paddingTop="4dp"
+                            android:paddingBottom="8dp" />
+
                         <TextView style="@style/CfgLabel" android:text="SIP Server" />
                         <EditText android:id="@+id/etCfgServer" style="@style/CfgField"
                             android:hint="callagent.pro" android:inputType="textUri" />

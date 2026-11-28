@@ -34,6 +34,7 @@ import com.callagent.gateway.bridge.CallOrchestrator
 import com.callagent.gateway.gsm.GsmCallManager
 import com.callagent.gateway.net.StunClient
 import com.callagent.gateway.sip.SipClient
+import com.callagent.gateway.update.AppUpdater
 import com.callagent.gateway.ussd.UssdRequest
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -1065,8 +1066,48 @@ class GatewayService : Service() {
             ?: broadcastLog("ERROR: Gateway not running — cannot bridge to SIP")
     }
 
-    // ── USSD ─────────────────────────────────────────────
+    // ── Update ────────────────────────────────────────────
 
+    /** Whether the release feed has already been asked in this process. */
+    @Volatile private var updateChecked = false
+
+    /**
+     * Ask whether a newer build is published, and put it over if there is.
+     *
+     * The gateway runs unattended for days, so the check belongs here rather
+     * than in the interface: a build that fixes something is put in place
+     * without anyone opening the application.  It runs on its own thread and
+     * after the SIP client is up — the network must not wait for the feed,
+     * and the feed must not delay the registration.
+     */
+    private fun checkForUpdate() {
+        if (updateChecked) return
+        updateChecked = true
+        val auto = getSharedPreferences("gateway", MODE_PRIVATE).getBoolean("auto_update", true)
+        thread(name = "app-update") {
+            // A build that is put over the running one stops this process,
+            // and a stopped process takes the call with it.  A bridged call
+            // is worth more than a build: the update waits for the line to
+            // be free and is put in place at the next start.
+            val callUp = GsmCallManager.activeCall != null
+            if (callUp) broadcastLog("Update: a call is up — the newer build waits")
+            val outcome = AppUpdater.run(this, BuildConfig.VERSION_NAME, auto && !callUp) { msg ->
+                broadcastLog(msg)
+            }
+            broadcastUpdateState(outcome)
+        }
+    }
+
+    /** Tell the interface what the update check found. */
+    private fun broadcastUpdateState(outcome: AppUpdater.Outcome) {
+        val intent = Intent(UPDATE_ACTION).apply {
+            setPackage(packageName)
+            putExtra("state", outcome.describe())
+        }
+        sendBroadcast(intent)
+    }
+
+    // ── USSD ─────────────────────────────────────────────
     /**
      * Send a USSD code to the network and tell the UI what came back.
      *
@@ -1461,6 +1502,10 @@ class GatewayService : Service() {
         try {
             sip.start()
             broadcastLog("[v${BuildConfig.VERSION_NAME}] SIP client started, registering with $cfgServer:$cfgPort")
+            // The update check waits for the SIP client to be up: a build that
+            // is put over the running one stops this process, and the gateway
+            // must be registered before that happens.
+            checkForUpdate()
             broadcastStatus("STARTING", "Registering with $cfgServer")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start SIP client: ${e.message}", e)
@@ -1948,6 +1993,9 @@ class GatewayService : Service() {
 
         /** What came back from a USSD request. */
         const val USSD_RESULT_ACTION = "com.callagent.gateway.USSD_RESULT"
+
+        /** What the update check found. */
+        const val UPDATE_ACTION = "com.callagent.gateway.UPDATE"
 
         /** How long to wait before retrying a message the server did not take. */
         private const val SMS_RETRY_MS = 30_000L

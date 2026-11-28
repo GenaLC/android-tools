@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The paths the application may hand to another one.
+
+    Only the cache is exposed, and only the file that was downloaded for the
+    update: nothing else in the application's storage can be read through
+    this provider.
+-->
+<paths>
+    <cache-path name="updates" path="." />
+</paths>

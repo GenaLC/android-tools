@@ -66,6 +66,7 @@ import com.callagent.gateway.sip.SipTrust
 import com.callagent.gateway.sip.SipTrustProvider
 import com.callagent.gateway.sms.SmsOutbox
 import com.callagent.gateway.service.GatewayService
+import com.callagent.gateway.update.AppUpdater
 import com.callagent.gateway.ussd.UssdRequest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -138,6 +139,11 @@ class MainActivity : AppCompatActivity() {
     /** The SIMs in the picker, in the order it shows them.  -1 is the SIM the
      *  platform places calls with — the one the gateway itself calls from. */
     private val ussdSims = mutableListOf(-1)
+
+    // ── Update ────────────────────────────────────────────
+    private lateinit var tvCfgUpdate: TextView
+    private lateinit var btnCfgCheckUpdate: Button
+    private lateinit var cbCfgAutoUpdate: CheckBox
     /** "all" | "in" | "out" | "sms" — which entries the home list shows.  A missed call
      *  is an inbound one that never carried audio, so it belongs under
      *  Incoming rather than in a category of its own. */
@@ -335,6 +341,10 @@ class MainActivity : AppCompatActivity() {
                     val msg = intent.getStringExtra("msg") ?: return
                     appendLog(msg)
                 }
+                GatewayService.UPDATE_ACTION -> {
+                    val state = intent.getStringExtra("state") ?: return
+                    tvCfgUpdate.text = state
+                }
                 GatewayService.USSD_RESULT_ACTION -> {
                     val code = intent.getStringExtra("ussd_code") ?: return
                     val response = intent.getStringExtra("ussd_response") ?: ""
@@ -422,6 +432,12 @@ class MainActivity : AppCompatActivity() {
         btnUssdSend = findViewById(R.id.btnUssdSend)
         tvUssdResponse = findViewById(R.id.tvUssdResponse)
         btnUssdSend.setOnClickListener { sendUssdFromUi() }
+
+        // Update
+        tvCfgUpdate = findViewById(R.id.tvCfgUpdate)
+        btnCfgCheckUpdate = findViewById(R.id.btnCfgCheckUpdate)
+        cbCfgAutoUpdate = findViewById(R.id.cbCfgAutoUpdate)
+        btnCfgCheckUpdate.setOnClickListener { checkForUpdateByHand() }
 
         // Named and versioned at the top of settings.  It is the first thing
         // asked for when a change appears not to have taken, and this deploy
@@ -594,6 +610,34 @@ class MainActivity : AppCompatActivity() {
             container.addView(row)
             ownNumberFields += sim.slot to et
         }
+    }
+
+    // ── Update ────────────────────────────────────────────
+
+    /**
+     * Ask the release feed what is newest and put it over, if it is.
+     *
+     * The check is network work, so it runs on its own thread; the button
+     * says it is working, and the answer lands in the line above it.  A
+     * build that is put over the running one stops this process — the system
+     * starts the application again, and the gateway comes back with it.
+     */
+    private fun checkForUpdateByHand() {
+        btnCfgCheckUpdate.isEnabled = false
+        tvCfgUpdate.text = "Checking…"
+        Thread {
+            // A build that is put over the running one stops this process,
+            // and a stopped process takes the call with it.
+            val callUp = com.callagent.gateway.gsm.GsmCallManager.activeCall != null
+            if (callUp) appendLog("Update: a call is up — the build waits")
+            val outcome = AppUpdater.run(this, BuildConfig.VERSION_NAME, !callUp) { msg ->
+                appendLog(msg)
+            }
+            runOnUiThread {
+                btnCfgCheckUpdate.isEnabled = true
+                tvCfgUpdate.text = outcome.describe()
+            }
+        }.start()
     }
 
     // ── USSD ─────────────────────────────────────────────
@@ -789,6 +833,11 @@ class MainActivity : AppCompatActivity() {
             prefs.getInt("auto_answer_delay_ms",
                 com.callagent.gateway.bridge.AutoAnswerPolicy.DEFAULT_DELAY_MS).toString()
         )
+        // The gateway asks the release feed on its own at start-up.  The
+        // switch says whether it may put a newer build over the running one
+        // on its own, or only report that there is one.
+        cbCfgAutoUpdate.isChecked = prefs.getBoolean("auto_update", true)
+        if (tvCfgUpdate.text.isEmpty()) tvCfgUpdate.text = "Not checked yet"
         val cbTls = findViewById<CheckBox>(R.id.cbCfgTls)
         val cbSrtp = findViewById<CheckBox>(R.id.cbCfgSrtp)
         cbTls.isChecked = prefs.getBoolean("sip_tls", false)
@@ -905,6 +954,7 @@ class MainActivity : AppCompatActivity() {
         val autoAnswerOut = findViewById<CheckBox>(R.id.cbCfgAutoAnswerOut).isChecked
         val autoAnswerIn = findViewById<CheckBox>(R.id.cbCfgAutoAnswerIn).isChecked
         val earlyMedia = findViewById<CheckBox>(R.id.cbCfgEarlyMedia).isChecked
+        val autoUpdate = findViewById<CheckBox>(R.id.cbCfgAutoUpdate).isChecked
         val inboundDestination =
             findViewById<EditText>(R.id.etCfgInboundDestination).text.toString().trim()
         val autoAnswerDelay = com.callagent.gateway.bridge.AutoAnswerPolicy.delayMs(
@@ -945,6 +995,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("auto_answer_out", autoAnswerOut)
             .putBoolean("auto_answer_in", autoAnswerIn)
             .putBoolean("early_media", earlyMedia)
+            .putBoolean("auto_update", autoUpdate)
             .putString("inbound_sip_destination", inboundDestination)
             .putInt("auto_answer_delay_ms", autoAnswerDelay)
             .putBoolean("sip_tls", tls)
@@ -963,6 +1014,7 @@ class MainActivity : AppCompatActivity() {
                 "auto-answer out=${if (autoAnswerOut) "on" else "off"}, " +
                 "auto-answer in=${if (autoAnswerIn) "on" else "off"}, " +
                 "early media=${if (earlyMedia) "on" else "off"} (${autoAnswerDelay}ms), " +
+                "auto-update=${if (autoUpdate) "on" else "off"}, " +
                 "inbound SIP=${inboundDestination.ifEmpty { "SIM's own number" }}, " +
                     "agent volume ${if (agentVolStep > 0) "+$agentVolStep" else "$agentVolStep"})"
         )
@@ -1695,6 +1747,7 @@ class MainActivity : AppCompatActivity() {
             addAction(GatewayService.STATUS_ACTION)
             addAction(GatewayService.LOG_ACTION)
             addAction(GatewayService.USSD_RESULT_ACTION)
+            addAction(GatewayService.UPDATE_ACTION)
         }
         // NOT_EXPORTED: the service sends these with setPackage(), so nothing
         // outside the app has any business delivering them — exported, any
