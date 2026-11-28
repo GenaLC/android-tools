@@ -71,6 +71,25 @@ object GsmCallManager {
     }
 
     /**
+     * The name of a call state.
+     *
+     * [Call.STATE_CONNECTING] is the state an outgoing call sits in while the
+     * far end is alerting — and that is exactly when the network plays its
+     * own announcement, so the name says so.
+     */
+    private fun stateName(state: Int): String = when (state) {
+        Call.STATE_NEW -> "NEW"
+        Call.STATE_DIALING -> "DIALING"
+        Call.STATE_CONNECTING -> "CONNECTING (the far end is alerting)"
+        Call.STATE_RINGING -> "RINGING"
+        Call.STATE_ACTIVE -> "ACTIVE"
+        Call.STATE_DISCONNECTING -> "DISCONNECTING"
+        Call.STATE_DISCONNECTED -> "DISCONNECTED"
+        Call.STATE_HOLDING -> "HOLDING"
+        else -> "OTHER($state)"
+    }
+
+    /**
      * Key presses from the SIP side, played on the GSM call.
      *
      * Call.playDtmfTone()/stopDtmfTone() go through Telecom to the telephony
@@ -206,6 +225,12 @@ object GsmCallManager {
 
     fun onCallStateChanged(call: Call, state: Int) {
         activeCallState = state
+
+        // Every state change goes into the app log as well: the state the leg
+        // is in when the operator's announcement is played is the thing that
+        // decides whether the announcement can be captured at all, and the
+        // app log is the only copy of it the user can hand over.
+        appLog("GSM state: ${stateName(state)}")
 
         when (state) {
             Call.STATE_RINGING -> {

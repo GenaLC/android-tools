@@ -680,13 +680,14 @@ class MainActivity : AppCompatActivity() {
         // a device whose audio policy has no telephony TX route.
         findViewById<CheckBox>(R.id.cbCfgDigitalBridge).isChecked =
             prefs.getBoolean("digital_bridge", true)
-        // Early media and the early answer of the cellular leg.  The outbound
-        // auto-answer is on by default: the operator's announcement is only on
-        // the cellular downlink, and the downlink opens only once the leg is
-        // answered.  The inbound one is off: it would cost the caller their
-        // ringback.
+        // Early media and the early answer of the cellular leg.  Both
+        // auto-answers are off by default: the operator's announcement is
+        // caught by the early capture — the downlink is read while the leg is
+        // still alerting — and answering the leg ourselves does not work on
+        // this device (the leg stays in ALERTING).  The inbound auto-answer
+        // would cost the caller their ringback.
         findViewById<CheckBox>(R.id.cbCfgAutoAnswerOut).isChecked =
-            prefs.getBoolean("auto_answer_out", true)
+            prefs.getBoolean("auto_answer_out", false)
         findViewById<CheckBox>(R.id.cbCfgAutoAnswerIn).isChecked =
             prefs.getBoolean("auto_answer_in", false)
         findViewById<CheckBox>(R.id.cbCfgEarlyMedia).isChecked =

@@ -99,16 +99,22 @@ class CallOrchestrator(
         context.getSharedPreferences("gateway", Context.MODE_PRIVATE).getInt(key, default)
 
     /**
-     * Answer the cellular leg we place ourselves, before the far end does.
+     * Answer the outgoing cellular leg ourselves, before the far end does.
      *
      * The cellular network says things of its own before anybody picks up:
      * "this number is not available", a billing prompt, a queue announcement.
-     * That sound exists only on the cellular downlink, and the downlink is
-     * only open once the leg is answered — so without an early answer it is
-     * never heard at all.  Answering the leg ourselves is what puts the
-     * announcement on the downlink where the RTP session can pick it up.
+     * That sound exists only on the cellular downlink, and answering the leg
+     * ourselves was the way of putting it there where the RTP session could
+     * pick it up.
+     *
+     * Off by default.  On this device the answer never takes — the leg stays
+     * in CONNECTING, the state a call sits in while the far end is alerting
+     * (measured 2026-11-28 13:39: the server accepted the 183, no 200 OK
+     * ever came, CDR NO ANSWER) — so the announcement stayed on the handset
+     * and never reached the agent.  The early capture catches it instead,
+     * without answering anything.
      */
-    private fun autoAnswerOutboundEnabled(): Boolean = prefBool("auto_answer_out", true)
+    private fun autoAnswerOutboundEnabled(): Boolean = prefBool("auto_answer_out", false)
 
     /**
      * Answer an incoming cellular call before the agent does.
@@ -841,6 +847,13 @@ class CallOrchestrator(
                                 } else if (activeRtpSession != null) {
                                     Log.i(TAG, "Early media is already carrying the stream — " +
                                             "answering the call")
+                                    // The session was started before the cellular
+                                    // leg was up: the capture has to be opened
+                                    // again (a source created before the voice
+                                    // path existed stays silent) and the voice
+                                    // path itself — the injection, the mutes —
+                                    // has to be applied now.
+                                    activeRtpSession?.applyForActiveLeg()
                                 }
                                 sipCall.accept(rtpPort)
                             }
@@ -863,6 +876,9 @@ class CallOrchestrator(
     override fun onGsmCallStateChanged(call: Call, state: Int) {
         val stateStr = when (state) {
             Call.STATE_DIALING -> "DIALING"
+            // The far end is alerting — the state an outgoing call sits in
+            // while the network plays its own announcement.
+            Call.STATE_CONNECTING -> "CONNECTING (alerting)"
             Call.STATE_RINGING -> "RINGING"
             Call.STATE_ACTIVE -> "ACTIVE"
             Call.STATE_DISCONNECTED -> "DISCONNECTED"
@@ -1173,18 +1189,56 @@ class CallOrchestrator(
             return
         }
 
-        // The RTP session does NOT go up with the 183.  It is put up when the
-        // cellular leg comes up, because the HAL rewrites the voice path when
-        // it programs the call — the incall-music setup written before that
-        // is gone with it, and the agent's voice would never reach the
-        // caller.  The port named in the 183 is the one the session binds, so
-        // the early media and the answer are one stream.
+        // The RTP session does NOT wait for the cellular leg to come up.
+        //
+        // The operator's announcement is played by the network while the leg
+        // is still alerting — "абонент недоступен", a billing prompt, a queue
+        // announcement.  It is on the cellular downlink, and the downlink is
+        // only captured while the leg is up.  A session that starts at
+        // STATE_ACTIVE therefore starts after the announcement is over, and
+        // the agent hears nothing but the ringing.
+        //
+        // So the session goes up together with the 183: the port named in the
+        // 183 is the port the session binds, and the early media and the
+        // answer are one stream.  The capture in that phase runs in the early
+        // mode (see RtpSession's earlyCapture), and the voice path — the
+        // injection and the mutes — is applied when the leg comes up.
+        if (early) {
+            val addr = sipCall.remoteRtpAddress ?: sipClient.serverDomain
+            val port = sipCall.remoteRtpPort
+            val pt = sipCall.negotiatedPayloadType
+            if (port > 0) {
+                Log.i(TAG, "Early media stream starts now: $addr:$port pt=$pt port=$rtpPort")
+                listener?.onRtpStats(
+                    "Early media: capturing the cellular downlink at $addr:$port (port $rtpPort) " +
+                            "while the leg alerts"
+                )
+                Thread({
+                    try {
+                        startRtp(rtpPort, addr, port, pt,
+                            allowSilentStart = true, earlyCapture = true)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Early RTP setup failed: $t", t)
+                        listener?.onRtpStats("Early RTP setup failed: ${t.javaClass.simpleName}")
+                    }
+                }, "RTP-Start-Early").start()
+            } else {
+                Log.w(TAG, "The server named no RTP port in the INVITE — the early media has nowhere to go")
+                listener?.onRtpStats("Early media: the server named no RTP port")
+            }
+        }
 
         // The cellular network says things of its own before the far end
         // picks up — "this number is not available", a billing prompt, a queue
         // announcement.  That sound is only on the cellular downlink, and the
-        // downlink is only open once the leg is answered.  Answering it here
-        // is what lets the agent hear it.
+        // downlink is captured while the leg is alerting — see the early
+        // media above.
+        //
+        // Answering the leg ourselves was the other way of catching it, and
+        // it does not work on this device: the leg never leaves ALERTING
+        // (measured 2026-11-28 13:39 — the 183 was accepted by the server,
+        // no 200 OK ever came, CDR NO ANSWER), so the announcement stayed on
+        // the handset and never reached the agent.  It is off by default now.
         if (autoAnswerOutboundEnabled()) {
             val delay = autoAnswerDelayMs()
             Log.i(TAG, "Auto-answer of the cellular leg in ${delay}ms — " +
@@ -1199,7 +1253,8 @@ class CallOrchestrator(
 
     private fun startRtp(localPort: Int, remoteAddr: String, remotePort: Int,
                          payloadType: Int = RtpPacket.PT_G722,
-                         allowSilentStart: Boolean = gsmAutoAnswered) {
+                         allowSilentStart: Boolean = gsmAutoAnswered,
+                         earlyCapture: Boolean = false) {
         // Not @Synchronized, deliberately: tearDown() is, and it is reached
         // from the Telecom callback on the main thread, so sharing a monitor
         // with this method — which blocks for as long as AudioRecord takes to
@@ -1239,7 +1294,11 @@ class CallOrchestrator(
             // that capture is the network being quiet, not a dead source.
             // The same goes for the early media, whose capture runs before
             // the cellular leg is up at all.
-            allowSilentStart = allowSilentStart
+            allowSilentStart = allowSilentStart,
+            // Started before the cellular leg was up: the capture runs in the
+            // early phase, and the things that need the voice path — the
+            // injection, the mutes — are applied when the leg comes up.
+            earlyCapture = earlyCapture
         )
 
         // DTMF from the SIP side → the GSM call, so IVR menus work.  Accept

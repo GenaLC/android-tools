@@ -64,7 +64,25 @@ class RtpSession(
      * of the call — which loses the very announcement the early answer was
      * there to catch.
      */
-    private val allowSilentStart: Boolean = false
+    private val allowSilentStart: Boolean = false,
+    /**
+     * The session was started before the cellular leg was up.
+     *
+     * The operator's announcement is played while the leg is still alerting,
+     * so the downlink has to be captured from that moment on — the RTP
+     * session used to start only once the leg was answered, and by then the
+     * announcement was over.
+     *
+     * The early phase is different in three ways: the source list is short
+     * (the voice path may not exist yet, so a silent source is retired
+     * quickly instead of after the usual six seconds), the injection and the
+     * mutes are held back (the HAL rewrites the voice path when it programs
+     * the call, so anything written before that is lost — they are applied
+     * when the leg comes up), and the capture is opened again at that point,
+     * because a source opened before the call was set up can be bound to a
+     * path that stays silent.
+     */
+    private val earlyCapture: Boolean = false
 ) {
     private val running = AtomicBoolean(false)
     /** Ensures the stop callback is delivered once, including a session that
@@ -255,7 +273,8 @@ class RtpSession(
      *  Generous on purpose: a healthy source sits at ~100%, and the case this
      *  catches measured 70%, so anything near the threshold is unambiguous. */
     private val RATE_MIN_PERCENT = 85L
-    private val SILENCE_FRAME_LIMIT get() = profile.captureSilenceFrames
+    private val SILENCE_FRAME_LIMIT get() =
+        EarlyCapturePolicy.silenceLimitFrames(earlyCapture, profile.captureSilenceFrames)
 
     /**
      * How long an unproven source may stay silent at the start of a call
@@ -268,6 +287,37 @@ class RtpSession(
      * the source.
      */
     private val SILENT_START_GRACE_MS = 10_000L
+
+    /**
+     * True once the cellular leg is up.
+     *
+     * Until then the handset's loudspeaker stays open — the announcement is
+     * still being played there, and the microphone is the last resort for
+     * capturing it — and the injection is not written yet.
+     */
+    @Volatile private var cellularLegUp = false
+
+    /**
+     * Set when the capture has to be opened again.
+     *
+     * A source opened before the call was set up can be bound to a path that
+     * stays silent: the HAL picks the input usecase when the record stream is
+     * created, and before the voice path exists there is nothing to bind to.
+     */
+    @Volatile private var reopenCaptureRequested = false
+
+    /**
+     * The injection is waiting for the playback track.
+     *
+     * The HAL starts the incall-music usecase only when there is an active
+     * STREAM_MUSIC output, so the injection cannot be written before the
+     * track is playing.  If the cellular leg came up while this session was
+     * still starting, the playback loop writes it instead.
+     */
+    @Volatile private var injectionPending = false
+
+    /** True when this session was started before the cellular leg was up. */
+    val startedEarly: Boolean get() = earlyCapture
 
     var listener: Listener? = null
 
@@ -481,6 +531,17 @@ class RtpSession(
             configs.addAll(0, vr)
         }
 
+        // The early phase — the cellular leg is not up yet — has its own short
+        // list: the voice path may not exist, so the digital sources can be
+        // silent, and the room must not reach the agent as if it were the
+        // caller.  The microphone is the last resort: while the handset plays
+        // the announcement out loud, it is the only way to pick it up.
+        if (earlyCapture) {
+            val allowed = EarlyCapturePolicy.sources(profile.voiceDownlinkWorks)
+            configs.removeAll { it.source !in allowed }
+            Log.i(TAG, "Early capture sources: ${configs.joinToString { it.name }}")
+        }
+
         var record: AudioRecord? = null
         var usedRate = 8000
 
@@ -624,7 +685,12 @@ class RtpSession(
         }
         // Must happen before the track exists on HALs that pick the output
         // usecase at creation time — see DeviceProfile.incallMusicBeforeTrack.
-        if (profile.incallMusicBeforeTrack) {
+        //
+        // Not in the early phase: the HAL rewrites the voice path when it
+        // programs the call, so an injection written before that is gone with
+        // it.  It is written when the leg comes up instead — see
+        // applyForActiveLeg().
+        if (profile.incallMusicBeforeTrack && !earlyCapture) {
             enableIncallMusic()
         }
 
@@ -697,7 +763,13 @@ class RtpSession(
         // This write is best effort: the HAL rewrites these controls when it
         // programs the call path, which is why the keeper re-asserts them
         // every few seconds for as long as the call lasts.
-        applyHandsetOutputMute(captureRms)
+        //
+        // Not in the early phase: the handset is still playing the operator's
+        // announcement out loud there, and the microphone is the last resort
+        // for capturing it — muting the loudspeaker first would throw it away.
+        if (!earlyCapture) {
+            applyHandsetOutputMute(captureRms)
+        }
         return true
     }
 
@@ -1020,6 +1092,11 @@ class RtpSession(
             configs.removeAll(vr)
             configs.addAll(0, vr)
         }
+        // The early phase has its own short list — see initAudio.
+        if (earlyCapture) {
+            val allowed = EarlyCapturePolicy.sources(profile.voiceDownlinkWorks)
+            configs.removeAll { it.source !in allowed }
+        }
         return configs.filterNot { it.source in silentSourceIds }
     }
 
@@ -1327,6 +1404,21 @@ class RtpSession(
                 // (HAL/modem not providing audio).  If rawCaptureRms>0 but
                 // captureRms=0, the echo gate is suppressing.
                 rawCaptureRms = pcmRms(pcmBuf)
+
+                // The cellular leg came up: the source has to be opened again.
+                // The HAL picks the input usecase when the record stream is
+                // created, and a stream created before the voice path existed
+                // is bound to a path that stays silent — it never recovers.
+                if (reopenCaptureRequested) {
+                    reopenCaptureRequested = false
+                    Log.i(TAG, "Capture reopen requested — the source is opened again with the voice path up")
+                    listener?.onRtpStats("Capture reopened after the cellular leg came up")
+                    // The sources retired during the early phase get another
+                    // turn: they were judged before the voice path existed.
+                    silentSourceIds.clear()
+                    releaseCaptureSource()
+                    return false
+                }
                 capDump?.let { try { it.write(pcmBuf, 0, read) } catch (_: Exception) {} }
                 if (monitorTrack != null) lastCallerFrame = pcmBuf.copyOf()
 
@@ -1624,35 +1716,41 @@ class RtpSession(
         try { Thread.sleep(3_000) } catch (_: InterruptedException) { return }
         if (running.get()) {
             reAssertAppOps()
-            reToggleIncallMusic()
-            // The handset's own loudspeaker is muted now — three seconds in,
-            // with the digital capture already running.  The order matters: a
-            // framework mute of the voice path can take the path down with it
-            // on some chipsets, and then the agent stops hearing the caller.
-            // Muting after the capture is alive keeps the two apart, and the
-            // log carries the capture level from just before the mute.
-            try {
-                val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                if (am != null) GsmCallManager.muteLocalVoiceOutput(am, captureRms)
-            } catch (e: Exception) {
-                Log.w(TAG, "Local voice output mute failed: ${e.message}")
+            // In the early phase the cellular leg is not up yet: the handset is
+            // still playing the operator's announcement out loud and the
+            // microphone is the last source that can pick it up.  The re-toggle
+            // and the mutes wait for the leg — see applyForActiveLeg().
+            if (!earlyCapture) {
+                reToggleIncallMusic()
+                // The handset's own loudspeaker is muted now — three seconds in,
+                // with the digital capture already running.  The order matters: a
+                // framework mute of the voice path can take the path down with it
+                // on some chipsets, and then the agent stops hearing the caller.
+                // Muting after the capture is alive keeps the two apart, and the
+                // log carries the capture level from just before the mute.
+                try {
+                    val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    if (am != null) GsmCallManager.muteLocalVoiceOutput(am, captureRms)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Local voice output mute failed: ${e.message}")
+                }
+                // The profile's late HAL parameters — the ones that may take the
+                // voice path down with them — go in now, with the capture level
+                // from just before in the log.  If the capture goes quiet right
+                // after, that is what took it down.
+                // The handset's loudspeaker is muted at the output device — the
+                // codec's receiver and speaker paths — which is the one mute that
+                // cannot take the modem's downlink out of the agent's capture.
+                // This is the late pass: the HAL has programmed the call path by
+                // now, so this write is the one that sticks.  The keeper re-asserts
+                // it every few seconds from here on.
+                applyHandsetOutputMute(captureRms)
+                // The handset's microphone is disconnected from the analogue stage
+                // at the same moment: that is what takes the room out of what the
+                // agent hears, and it is the one cut that leaves the caller's
+                // voice alone (the caller's voice is digital by then).
+                applyHandsetMicCut(captureRms)
             }
-            // The profile's late HAL parameters — the ones that may take the
-            // voice path down with them — go in now, with the capture level
-            // from just before in the log.  If the capture goes quiet right
-            // after, that is what took it down.
-            // The handset's loudspeaker is muted at the output device — the
-            // codec's receiver and speaker paths — which is the one mute that
-            // cannot take the modem's downlink out of the agent's capture.
-            // This is the late pass: the HAL has programmed the call path by
-            // now, so this write is the one that sticks.  The keeper re-asserts
-            // it every few seconds from here on.
-            applyHandsetOutputMute(captureRms)
-            // The handset's microphone is disconnected from the analogue stage
-            // at the same moment: that is what takes the room out of what the
-            // agent hears, and it is the one cut that leaves the caller's
-            // voice alone (the caller's voice is digital by then).
-            applyHandsetMicCut(captureRms)
         }
 
         var tick = 0
@@ -1704,10 +1802,20 @@ class RtpSession(
                 // …and the same for the microphone cut: the HAL programs the
                 // call path itself and puts the microphone back when it does,
                 // so the room would come back into the capture without this.
-                applyHandsetMicCut(captureRms, repeat = true)
+                //
+                // Not before the cellular leg is up: in the early phase the
+                // microphone is the last source that can pick up the operator's
+                // announcement while the handset plays it out loud.
+                if (cellularLegUp) {
+                    applyHandsetMicCut(captureRms, repeat = true)
+                }
 
                 val elapsed = System.currentTimeMillis() - lastRtpReceivedTime
-                if (elapsed > RTP_TIMEOUT_MS) {
+                // Before the cellular leg is up the stream is one-sided: the
+                // server has nothing to send while the agent's phone is still
+                // ringing.  The timeout would fire on a call that is perfectly
+                // alive, so it only counts once the leg is up.
+                if (elapsed > RTP_TIMEOUT_MS && cellularLegUp) {
                     Log.w(TAG, "RTP timeout: no packets received for ${elapsed / 1000}s")
                     listener?.onRtpTimeout()
                     break
@@ -1991,6 +2099,57 @@ class RtpSession(
         listener?.onRtpStats(if (on) "Agent muted" else "Agent unmuted")
     }
 
+    /**
+     * The cellular leg is up.
+     *
+     * The session was started before that, so everything that depends on the
+     * voice path is applied now:
+     *
+     *  * the capture is opened again — the HAL picks the input usecase when
+     *    the record stream is created, and a stream created before the call
+     *    was programmed stays bound to a path that delivers silence;
+     *  * the injection is written — the HAL rewrites the voice path when it
+     *    programs the call, so an injection written before that is gone with
+     *    it;
+     *  * the handset's loudspeaker is closed and its microphone is taken out
+     *    of the call.
+     *
+     * The announcement has been carried by then, if the downlink could be
+     * captured at all; from here on this is an ordinary bridged call.
+     */
+    fun applyForActiveLeg() {
+        if (!earlyCapture) return
+        cellularLegUp = true
+        Log.i(TAG, "Cellular leg up — the capture is opened again and the injection applied")
+        listener?.onRtpStats("Cellular leg up — capture reopened, injection applied")
+
+        // The source is opened again: the one from the early phase may be
+        // bound to a path that stays silent.  The capture thread does the
+        // work, so the list of retired sources is cleared there and not here.
+        reopenCaptureRequested = true
+
+        // The injection: written now, after the HAL programmed the call path.
+        val track = audioTrack
+        if (track == null) {
+            // The session is still starting: the injection is written by the
+            // playback loop, once the track is playing.
+            injectionPending = true
+        } else {
+            enableIncallMusic()
+            // The playback track was created before the call was up: the
+            // telephony uplink device only exists while a call is up, so the
+            // track has to be pointed at it again — otherwise the agent's
+            // voice would go to the loudspeaker instead of into the call.
+            if (digitalBridgeActive || profile.playbackToTelephonyTx) {
+                routeToTelephonyTx(track)
+            }
+        }
+
+        // The room leaves the call, and the loudspeaker is closed.
+        applyHandsetMutes(digitalBridgeActive)
+        applyHandsetOutputMute(captureRms)
+    }
+
     /** Knee of [softLimit]: about 75% of full scale. */
     private val limitKnee = 24576
 
@@ -2153,7 +2312,18 @@ class RtpSession(
             // in-call record session the HAL has just started — measured on SM6150:
             // VOICE_CALL delivered real audio (rawRMS=208) until this second toggle
             // fired 8ms later, after which capture went to zero.
-            if (!profile.incallMusicBeforeTrack) {
+            //
+            // Also skipped in the early phase: the HAL rewrites the voice path
+            // when it programs the call, so the injection is written when the
+            // leg comes up instead.
+            if (injectionPending) {
+                // The cellular leg came up while this session was still
+                // starting: the injection is written now, with the track
+                // playing, which is what the HAL needs.
+                injectionPending = false
+                Log.i(TAG, "Injection written after the leg came up")
+                enableIncallMusic()
+            } else if (!profile.incallMusicBeforeTrack && !earlyCapture) {
                 enableIncallMusic()
             }
             // Set mixer controls via root — also handles Voice Tx Mute=0.
@@ -2166,7 +2336,13 @@ class RtpSession(
             // the HAL has settled, not at setup.  Only with the digital
             // bridge: without the injection into the modem's uplink the
             // microphone is the only way the agent reaches the caller.
-            applyHandsetMutes(digitalBridgeActive)
+            //
+            // Not in the early phase: the room must not be cut away while the
+            // handset is still playing the announcement and the microphone is
+            // the only source left that can pick it up.
+            if (!earlyCapture) {
+                applyHandsetMutes(digitalBridgeActive)
+            }
         }
 
         // Silence frame for when jitter buffer is empty — prevents underruns
@@ -2893,6 +3069,17 @@ class RtpSession(
             }
             if (!running.get()) return
             pass++
+
+            // Not before the cellular leg is up: in the early phase the
+            // handset is still playing the operator's announcement out loud,
+            // and the microphone is the last source that can pick it up.
+            if (!cellularLegUp) {
+                if (pass == 1) {
+                    Log.i(TAG, "Handset output keeper: waiting for the cellular leg")
+                    listener?.onRtpStats("Handset output: held open until the cellular leg is up")
+                }
+                continue
+            }
 
             // Why the mute cannot be written right now — if it cannot be
             // written at all, the reason is said once and the keeper keeps
