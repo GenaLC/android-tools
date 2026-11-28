@@ -107,6 +107,17 @@ build_apk() {
     echo "=== Building $BUILD_TYPE APK ==="
     echo ""
 
+    # Wipe the merged-dex output before building.
+    #
+    # The merge task writes its dex files into a directory and never clears
+    # it: each build leaves another one behind ("classes.dex", "classes 2.dex",
+    # "classes 3.dex", …), and the packaging step then zips *all* of them into
+    # the APK.  The result installs as three near-identical dex files — 12 MB
+    # instead of 5 MB, with the same classes twice over.
+    #
+    # It is invisible in the build log: the build says SUCCESSFUL either way.
+    rm -rf app/build/intermediates/dex app/build/intermediates/project_dex_archive
+
     if [ "$BUILD_TYPE" = "release" ]; then
         ./gradlew assembleRelease --no-daemon
         # Signed via the "shared" signingConfig, so the output is app-release.apk
@@ -214,6 +225,29 @@ build_magisk() {
     mkdir -p "$SCRIPT_DIR/magisk/system/priv-app/Gateway"
     cp "$SCRIPT_DIR/gateway.apk" "$SCRIPT_DIR/magisk/system/priv-app/Gateway/Gateway.apk"
     echo "Included APK as priv-app in Magisk module"
+
+    # Stamp the module's version from the app's.  Without this the module
+    # keeps the version it was written with, and Magisk Manager shows the
+    # old number for a module that carries the new APK — so the one thing
+    # that says which build is on the phone says the wrong thing.
+    #
+    # POSIX character classes, not \s: BSD sed does not know \s, and a regex
+    # it cannot match leaves the whole line in place — which is how the
+    # module ended up calling itself "v        versionName = ...".
+    APP_VERSION=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+        "$SCRIPT_DIR/app/build.gradle.kts" | head -1)
+    APP_VERSION_CODE=$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' \
+        "$SCRIPT_DIR/app/build.gradle.kts" | head -1)
+    if [ -n "$APP_VERSION" ] && [ -n "$APP_VERSION_CODE" ]; then
+        sed -i.bak \
+            -e "s/^version=.*/version=v$APP_VERSION/" \
+            -e "s/^versionCode=.*/versionCode=$APP_VERSION_CODE/" \
+            "$SCRIPT_DIR/magisk/module.prop"
+        rm -f "$SCRIPT_DIR/magisk/module.prop.bak"
+        echo "Module version stamped: v$APP_VERSION ($APP_VERSION_CODE)"
+    else
+        echo "WARNING: could not read the app version — module.prop left as it was"
+    fi
 
     cd "$SCRIPT_DIR/magisk"
     rm -f "$SCRIPT_DIR/gateway-magisk.zip"

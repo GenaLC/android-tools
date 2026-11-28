@@ -403,6 +403,46 @@ at flash time.  Getting this wrong fails quietly rather than loudly — the wron
 binary is still marked executable, so it looks present while every mixer
 command dies with `not executable: 64-bit ELF file`.
 
+## Updating an installed gateway
+
+The app lives **inside the Magisk module** as a privileged system app
+(`/system/priv-app/Gateway/Gateway.apk` via the module's overlay).  So an
+update is a module update:
+
+1. Copy the new `gateway-magisk.zip` to the device.
+2. Magisk Manager → Modules → Install → pick the zip → Install.
+3. Reboot when Magisk asks.  The overlay is rebuilt at boot and the
+   priv-app is replaced (the new `versionCode` has to be higher than the old
+   one, which it is).
+4. After the reboot the gateway restarts itself: `BootReceiver` listens for
+   `BOOT_COMPLETED` *and* `MY_PACKAGE_REPLACED`, re-grants `RECORD_AUDIO` and
+   brings the SIP client back up — as long as *Auto-connect* is on and the
+   credentials are saved.
+
+Settings, the call log and the SMS store survive: same package name, same
+signature.
+
+**Do not `adb install` the APK on top of the module.**  A package installed
+into `/data/app` is not a privileged system app, and without
+`CAPTURE_AUDIO_OUTPUT` the telephony capture (`VOICE_CALL`) is denied — the
+digital bridge stops carrying the caller's voice and the agent hears nothing.
+The module's own copy stays in `/system` and the wrong one wins, which is why
+this fails quietly.
+
+If the device is reachable over adb, the APK can be swapped inside the
+installed module instead of reinstalling it — same result, one reboot:
+
+```bash
+adb push gateway.apk /data/local/tmp/gateway.apk
+adb shell su -c 'cp /data/local/tmp/gateway.apk /data/adb/modules/sip-gsm-gateway/system/priv-app/Gateway/Gateway.apk'
+adb shell su -c 'chmod 644 /data/adb/modules/sip-gsm-gateway/system/priv-app/Gateway/Gateway.apk'
+adb reboot
+```
+
+To check which build is on the phone: the app's Settings screen shows the
+version at the top (`v1.4.21`), and Magisk Manager shows the module version,
+which now follows the app's.
+
 ## Device Setup
 
 Only the Magisk module needs to be installed — it includes the APK and handles all permissions automatically.

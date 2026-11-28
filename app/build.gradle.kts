@@ -15,8 +15,8 @@ android {
         // service/Compat.kt and service/GatewayService.kt.
         minSdk = 24
         targetSdk = 35
-        versionCode = 459
-        versionName = "1.4.20"
+        versionCode = 460
+        versionName = "1.4.21"
     }
 
     // A release build is signed with the same debug key the debug build uses.
@@ -45,6 +45,15 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    // The SIP dialog and the early-media logic are plain Kotlin, but they log
+    // through android.util.Log, which the stub jar refuses to run.  Returning
+    // the defaults instead lets the dialog state machine be tested on its own
+    // — without it, every test that touches a real code path dies on a log
+    // line.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     compileOptions {
