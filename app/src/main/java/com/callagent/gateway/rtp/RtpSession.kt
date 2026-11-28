@@ -316,6 +316,19 @@ class RtpSession(
      */
     @Volatile private var injectionPending = false
 
+    /**
+     * The handset's loudspeaker has been closed because the capture carries
+     * the announcement.
+     *
+     * In the early phase the loudspeaker was deliberately left open: the
+     * announcement was being played there, and the microphone was the last
+     * source that could pick it up.  Once the capture has proved it carries
+     * sound, the loudspeaker is closed — the announcement goes to the agent
+     * alone.  The mute is never written before that proof, so a mute that
+     * would throw the announcement away cannot be written at all.
+     */
+    @Volatile private var outputMutedAfterCapture = false
+
     /** True when this session was started before the cellular leg was up. */
     val startedEarly: Boolean get() = earlyCapture
 
@@ -1479,6 +1492,7 @@ class RtpSession(
                         // Source delivered audio during non-echo → working
                         silenceFrameCount = 0
                         sourceProven = true
+                        muteOutputOnceCaptureCarriesSound()
                     }
                 }
                 // During echo periods: don't update counter (can't distinguish
@@ -2097,6 +2111,24 @@ class RtpSession(
         agentMuted = on
         Log.i(TAG, if (on) "Agent MUTED towards caller" else "Agent unmuted")
         listener?.onRtpStats(if (on) "Agent muted" else "Agent unmuted")
+    }
+
+    /**
+     * Close the handset's loudspeaker once the capture carries the sound.
+     *
+     * In the early phase the loudspeaker is left open on purpose: the
+     * operator's announcement is being played there, and the microphone is
+     * the last source that can pick it up.  Once the capture has proved it
+     * delivers audio, the announcement is on its way to the agent and the
+     * loudspeaker has nothing left to say — it is closed then, and never
+     * before, so a mute can never throw the announcement away.
+     */
+    private fun muteOutputOnceCaptureCarriesSound() {
+        if (!earlyCapture || outputMutedAfterCapture) return
+        outputMutedAfterCapture = true
+        Log.i(TAG, "The capture carries the announcement — closing the handset's loudspeaker")
+        listener?.onRtpStats("The capture carries the announcement — the handset's loudspeaker is closed")
+        applyHandsetOutputMute(captureRms)
     }
 
     /**
@@ -3070,13 +3102,16 @@ class RtpSession(
             if (!running.get()) return
             pass++
 
-            // Not before the cellular leg is up: in the early phase the
-            // handset is still playing the operator's announcement out loud,
-            // and the microphone is the last source that can pick it up.
-            if (!cellularLegUp) {
+            // Not before the capture carries the announcement: in the early
+            // phase the handset is still playing it out loud, and the
+            // microphone is the last source that can pick it up.  Once the
+            // capture has proved it, the loudspeaker is closed — and the
+            // keeper keeps it closed, because the HAL rewrites these
+            // controls every time it programs the call path.
+            if (!cellularLegUp && !outputMutedAfterCapture) {
                 if (pass == 1) {
-                    Log.i(TAG, "Handset output keeper: waiting for the cellular leg")
-                    listener?.onRtpStats("Handset output: held open until the cellular leg is up")
+                    Log.i(TAG, "Handset output keeper: waiting for the announcement to be captured")
+                    listener?.onRtpStats("Handset output: held open until the announcement is captured")
                 }
                 continue
             }
