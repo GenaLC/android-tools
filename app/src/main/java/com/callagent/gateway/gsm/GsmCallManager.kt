@@ -243,9 +243,30 @@ object GsmCallManager {
     /** Answer a ringing GSM call */
     fun answerCall(call: Call? = activeCall) {
         call?.let {
+            // An active call cannot be answered again: the auto-answer may
+            // have got there first, and the SIP side answering afterwards
+            // must not send a second ATA to the modem.
+            if (it.state == Call.STATE_ACTIVE) {
+                Log.i(TAG, "GSM call is already active — not answering again")
+                return
+            }
             Log.i(TAG, "Answering GSM call")
-            it.answer(it.details.videoState)
-            if (profile.answerRetry) retryAnswerWhileRinging(it, 1)
+            // Also to the app log viewer: this is the line that says the
+            // cellular leg was answered early, and it is the first thing to
+            // look for when the operator's announcement did not reach the
+            // agent.
+            appLog("GSM: answering the cellular leg now")
+            try {
+                it.answer(it.details.videoState)
+                if (profile.answerRetry) retryAnswerWhileRinging(it, 1)
+            } catch (e: Exception) {
+                // Answering a call this phone placed itself is not an ordinary
+                // operation: the telephony stack may refuse it, and the
+                // early answer of the cellular leg is a convenience, not a
+                // reason to take the bridge down with it.
+                Log.w(TAG, "GSM answer failed: ${e.message}")
+                appLog("GSM answer failed: ${e.message}")
+            }
         }
     }
 

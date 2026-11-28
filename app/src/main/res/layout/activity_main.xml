@@ -814,6 +814,69 @@
                             android:textColor="@color/text_hint"
                             android:paddingTop="6dp" />
 
+                        <CheckBox
+                            android:id="@+id/cbCfgAutoAnswerOut"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Auto-answer the cellular leg (outbound)"
+                            android:buttonTint="@color/accent"
+                            android:textColor="@color/text_label"
+                            android:layout_marginTop="8dp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Answers the cellular call this phone places before the far end does. The network's own announcement — “this number is not available”, a billing prompt — is only on the cellular downlink, and the downlink opens only once the leg is answered, so without this it is never heard by the agent."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
+                        <CheckBox
+                            android:id="@+id/cbCfgAutoAnswerIn"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Auto-answer the cellular leg (incoming)"
+                            android:buttonTint="@color/accent"
+                            android:textColor="@color/text_label"
+                            android:layout_marginTop="8dp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Off by default: the caller would hear silence instead of a ringback while the agent's phone is still ringing, which reads as an answered call with nobody there."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
+                        <CheckBox
+                            android:id="@+id/cbCfgEarlyMedia"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Early media (183 with SDP)"
+                            android:buttonTint="@color/accent"
+                            android:textColor="@color/text_label"
+                            android:layout_marginTop="8dp" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Tells the server the media path is up while the call is still ringing there, so the cellular side reaches the agent before the call is answered. A server that offers early media is answered the same way."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
+                        <TextView style="@style/CfgLabel" android:text="Auto-answer delay (ms)" />
+                        <EditText android:id="@+id/etCfgAutoAnswerDelay" style="@style/CfgField"
+                            android:hint="1200" android:inputType="number" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="How long to wait before the early answer. Too short and the network has not set the channel up yet; too long and the beginning of the announcement is gone."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:paddingTop="6dp" />
+
                         <Button
                             android:id="@+id/btnCfgClearRecents"
                             android:layout_width="wrap_content"

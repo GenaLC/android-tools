@@ -76,6 +76,57 @@ class CallOrchestrator(
     private var sipCallRetries = 0
     private val MAX_SIP_RETRIES = 2
 
+    /** True once we have offered early media (183 with SDP) to the server. */
+    @Volatile private var earlyMediaSent = false
+
+    /**
+     * True when the cellular leg was answered by us rather than by the far
+     * end.
+     *
+     * It matters to the RTP session: such a leg opens the downlink before
+     * the network has anything to say on it, so the first seconds of the
+     * capture are legitimately silent and must not be taken for a dead
+     * source.
+     */
+    @Volatile private var gsmAutoAnswered = false
+
+    // ── Early media and auto-answer ─────────────────────
+
+    private fun prefBool(key: String, default: Boolean): Boolean =
+        context.getSharedPreferences("gateway", Context.MODE_PRIVATE).getBoolean(key, default)
+
+    private fun prefInt(key: String, default: Int): Int =
+        context.getSharedPreferences("gateway", Context.MODE_PRIVATE).getInt(key, default)
+
+    /**
+     * Answer the cellular leg we place ourselves, before the far end does.
+     *
+     * The cellular network says things of its own before anybody picks up:
+     * "this number is not available", a billing prompt, a queue announcement.
+     * That sound exists only on the cellular downlink, and the downlink is
+     * only open once the leg is answered — so without an early answer it is
+     * never heard at all.  Answering the leg ourselves is what puts the
+     * announcement on the downlink where the RTP session can pick it up.
+     */
+    private fun autoAnswerOutboundEnabled(): Boolean = prefBool("auto_answer_out", true)
+
+    /**
+     * Answer an incoming cellular call before the agent does.
+     *
+     * Off by default: the caller would hear silence instead of a ringback
+     * while the agent's phone is still ringing, which reads to the caller as
+     * an answered call with nobody there.
+     */
+    private fun autoAnswerInboundEnabled(): Boolean = prefBool("auto_answer_in", false)
+
+    /** How long to wait before the early answer. */
+    private fun autoAnswerDelayMs(): Int = AutoAnswerPolicy.delayMs(
+        prefInt("auto_answer_delay_ms", AutoAnswerPolicy.DEFAULT_DELAY_MS)
+    )
+
+    /** Send (and accept) early media: a 183 carrying our SDP. */
+    private fun earlyMediaEnabled(): Boolean = prefBool("early_media", true)
+
     /** One thread for every deferred bridge action, instead of a fresh Thread
      *  per dial, per INVITE and per retry. */
     private val timers: ScheduledExecutorService =
@@ -649,6 +700,50 @@ class CallOrchestrator(
                 tearDown("inbound flow failed: ${t.javaClass.simpleName}")
             }
         }, "SIP-OutCall").start()
+
+        // The cellular leg may also be answered on our own, so that whatever
+        // the network says before anybody picks up is not lost.  Off by
+        // default — see autoAnswerInboundEnabled().
+        if (autoAnswerInboundEnabled()) {
+            val delay = autoAnswerDelayMs()
+            Log.i(TAG, "Auto-answer of the incoming cellular leg in ${delay}ms")
+            schedule(delay.toLong()) {
+                answerCellularLegEarly(setOf(
+                    BridgeState.GSM_RINGING, BridgeState.SIP_CALLING, BridgeState.SIP_RINGING
+                ))
+            }
+        }
+    }
+
+    /**
+     * Answer the cellular leg before the far end does, so that whatever the
+     * network says in the meantime is on the downlink, where the RTP session
+     * can pick it up and carry it to the agent.
+     *
+     * Retried a few times: the call object appears only once Telecom has
+     * created it, which can be a moment after the ringing callback.
+     */
+    private fun answerCellularLegEarly(allowed: Set<BridgeState>, attempt: Int = 0) {
+        if (bridgeState !in allowed) return
+        val call = activeGsmCall ?: GsmCallManager.activeCall
+        if (!AutoAnswerPolicy.shouldAttempt(call != null, attempt)) {
+            Log.w(TAG, "Auto-answer: no cellular call object after ${attempt + 1} tries")
+            return
+        }
+        if (call == null) {
+            schedule(AutoAnswerPolicy.RETRY_MS) {
+                answerCellularLegEarly(allowed, attempt + 1)
+            }
+            return
+        }
+        if (GsmCallManager.isCallActive) {
+            Log.i(TAG, "Auto-answer: the cellular leg is already active")
+            return
+        }
+        Log.i(TAG, "Answering the cellular leg now (auto-answer) — " +
+                "the operator's announcement becomes audible")
+        gsmAutoAnswered = true
+        GsmCallManager.answerCall(call)
     }
 
     /** GSM call is now active (answered) */
@@ -670,7 +765,7 @@ class CallOrchestrator(
 
                 if (addr != null && port > 0) {
                     Thread({
-                        startRtp(localPort, addr, port, pt)
+                        ensureRtp(localPort, addr, port, pt)
                         // Guard: tearDown may have run while startRtp was blocking
                         // (AudioRecord retries take 30+ seconds on cold boot).
                         // Don't overwrite IDLE — that causes "Busy" on next call.
@@ -709,25 +804,67 @@ class CallOrchestrator(
             }
         }, "SIP-OutCall").start()
                 } else {
-                    // SIP-initiated OUTBOUND flow: GSM destination answered → start audio bridge
+                    // SIP-initiated OUTBOUND flow: the cellular leg is up.
+                    // Whatever the network was saying — the operator's
+                    // announcement — is on the cellular downlink right now,
+                    // and it has to reach the agent.
                     bridgeState = BridgeState.BRIDGED
                     listener?.onStateChanged(bridgeState, "Bridged (outbound)")
 
                     // Answer the SIP call off the main thread
                     Thread({
-                        activeSipCall?.let { sipCall ->
-                            val rtpPort = allocateRtpPort()
-                            sipCall.listener = this
-                            sipCall.accept(rtpPort)
+                        try {
+                            activeSipCall?.let { sipCall ->
+                                val rtpPort = allocateRtpPort()
+                                sipCall.listener = this
+                                val addr = sipCall.remoteRtpAddress ?: sipClient.serverDomain
+                                val port = sipCall.remoteRtpPort
+                                val pt = sipCall.negotiatedPayloadType
 
-                            val addr = sipCall.remoteRtpAddress ?: sipClient.serverDomain
-                            val port = sipCall.remoteRtpPort
-                            val pt = sipCall.negotiatedPayloadType
-                            if (port > 0) {
-                                startRtp(rtpPort, addr, port, pt)
+                                // The early answer tells the server that the
+                                // media path is up while the call is still
+                                // ringing there.
+                                val early = earlyMediaEnabled() && port > 0 &&
+                                        sipCall.answerEarly(rtpPort)
+                                if (early) {
+                                    Log.i(TAG, "Early media offered to the server " +
+                                            "(183 + SDP), port=$rtpPort")
+                                    earlyMediaSent = true
+                                }
+
+                                if (early) {
+                                    // Media first, answer second: the
+                                    // operator's announcement then reaches the
+                                    // agent from its first frame instead of
+                                    // into silence.
+                                    try {
+                                        startRtp(rtpPort, addr, port, pt)
+                                    } catch (t: Throwable) {
+                                        Log.e(TAG, "RTP setup failed: $t", t)
+                                        listener?.onError("RTP: ${t.javaClass.simpleName}")
+                                    }
+                                    sipCall.accept(rtpPort)
+                                } else {
+                                    sipCall.accept(rtpPort)
+                                    if (port > 0) {
+                                        try {
+                                            startRtp(rtpPort, addr, port, pt)
+                                        } catch (t: Throwable) {
+                                            Log.e(TAG, "RTP setup failed: $t", t)
+                                            listener?.onError("RTP: ${t.javaClass.simpleName}")
+                                        }
+                                    }
+                                }
                             }
+                            Log.i(TAG, "Outbound bridge established")
+                        } catch (t: Throwable) {
+                            // The server is waiting for an answer.  Letting the
+                            // thread die silently would leave it ringing out
+                            // its own transaction timeout instead of being
+                            // told what went wrong.
+                            Log.e(TAG, "Outbound bridge failed: $t", t)
+                            tearDown("outbound bridge failed: ${t.javaClass.simpleName}")
                         }
-                        Log.i(TAG, "Outbound bridge established")
                     }, "SIP-Bridge").start()
                 }
             }
@@ -829,6 +966,63 @@ class CallOrchestrator(
         GsmCallManager.dtmfRelay.pulse(digit, durationMs)
     }
 
+    /**
+     * The server is sending media before the call is answered — a 183 with
+     * our SDP in it.
+     *
+     * That is the far end's early media, and it means the stream is live
+     * while the agent's phone is still ringing.  Whatever the cellular side
+     * has to say goes into it right away; the cellular side has to be up for
+     * that, so the address is remembered when it is not.
+     */
+    override fun onEarlyMedia(call: SipCall, remoteRtpAddr: String, remoteRtpPort: Int, payloadType: Int) {
+        Log.i(TAG, "Early media from the server: $remoteRtpAddr:$remoteRtpPort pt=$payloadType " +
+                "(bridge=$bridgeState)")
+        if (call !== activeSipCall) {
+            Log.w(TAG, "Early media for a call that is not bridged — ignored")
+            return
+        }
+        if (bridgeState != BridgeState.SIP_CALLING && bridgeState != BridgeState.SIP_RINGING &&
+            bridgeState != BridgeState.GSM_ANSWERED) {
+            Log.w(TAG, "Early media ignored — bridge state $bridgeState")
+            return
+        }
+
+        pendingRtpAddr = remoteRtpAddr
+        pendingRtpPort = remoteRtpPort
+        pendingPayloadType = payloadType
+        pendingLocalRtpPort = call.localRtpPort
+
+        // With the cellular leg already up there is something to send, and
+        // the far end is already listening for it.
+        if (GsmCallManager.isCallActive) {
+            Log.i(TAG, "Early media and the cellular leg is up — starting RTP now")
+            ensureRtp(call.localRtpPort, remoteRtpAddr, remoteRtpPort, payloadType)
+            if (activeRtpSession != null &&
+                (bridgeState == BridgeState.SIP_CALLING || bridgeState == BridgeState.SIP_RINGING)) {
+                bridgeState = BridgeState.BRIDGED
+                listener?.onStateChanged(bridgeState, "Bridged (early media)")
+            }
+        } else {
+            Log.i(TAG, "Early media noted — the media starts when the cellular leg comes up")
+        }
+    }
+
+    /**
+     * Start the RTP session, unless one is already running.
+     *
+     * The early media and the final answer can both reach the media at the
+     * same time; two sessions would mean two capture streams and two audio
+     * routes on one call.
+     */
+    private fun ensureRtp(localPort: Int, addr: String, port: Int, pt: Int) {
+        if (activeRtpSession != null) {
+            Log.i(TAG, "RTP session already running — keeping it")
+            return
+        }
+        startRtp(localPort, addr, port, pt)
+    }
+
     override fun onRtpReady(call: SipCall, remoteRtpAddr: String, remoteRtpPort: Int, payloadType: Int) {
         val codecName = when (payloadType) {
             RtpPacket.PT_G722 -> "G.722"
@@ -837,6 +1031,16 @@ class CallOrchestrator(
             else -> "PT$payloadType"
         }
         Log.i(TAG, "RTP ready: $remoteRtpAddr:$remoteRtpPort codec=$codecName bridgeState=$bridgeState")
+
+        // The media can already be running: the early media started it, and
+        // the 200 OK that follows only confirms a stream that is already
+        // there.  Two sessions on one call would mean two capture streams
+        // and two audio routes.
+        if (activeRtpSession != null) {
+            Log.i(TAG, "RTP is already running — the 200 OK does not start a second session" +
+                    (if (earlyMediaSent) " (the early media is what is running it)" else ""))
+            return
+        }
 
         if (bridgeState == BridgeState.SIP_CALLING || bridgeState == BridgeState.SIP_RINGING) {
             // Check if GSM is already active (dialler-initiated calls).
@@ -872,10 +1076,11 @@ class CallOrchestrator(
                     ?: Log.e(TAG, "SIP answered but no active GSM call to answer!")
             }
         } else if (bridgeState == BridgeState.GSM_ANSWERED) {
-            // Edge case: GSM was already answered (e.g. user picked up manually)
-            // before SIP was ready.  Start RTP now.
+            // Edge case: GSM was already answered (e.g. user picked up manually
+            // or the auto-answer got there first) before SIP was ready.
+            // Start RTP now.
             val localRtpPort = call.localRtpPort
-            startRtp(localRtpPort, remoteRtpAddr, remoteRtpPort, payloadType)
+            ensureRtp(localRtpPort, remoteRtpAddr, remoteRtpPort, payloadType)
             bridgeState = BridgeState.BRIDGED
             listener?.onStateChanged(bridgeState, "Bridged (inbound)")
             Log.i(TAG, "Bridge established (codec=$codecName)")
@@ -958,6 +1163,21 @@ class CallOrchestrator(
         if (!GsmCallManager.makeCall(context, gsmDestination, cid, headless = true)) {
             Log.e(TAG, "Cannot dial GSM: SIP Outbound CID ${cid ?: "missing"} does not select a unique SIM")
             tearDown("No matching SIM for Outbound CID", 503 to "No Matching SIM")
+            return
+        }
+
+        // The cellular network says things of its own before the far end
+        // picks up — "this number is not available", a billing prompt, a queue
+        // announcement.  That sound is only on the cellular downlink, and the
+        // downlink is only open once the leg is answered.  Answering it here
+        // is what lets the agent hear it.
+        if (autoAnswerOutboundEnabled()) {
+            val delay = autoAnswerDelayMs()
+            Log.i(TAG, "Auto-answer of the cellular leg in ${delay}ms — " +
+                    "catching the operator's announcement")
+            schedule(delay.toLong()) {
+                answerCellularLegEarly(setOf(BridgeState.GSM_DIALING))
+            }
         }
     }
 
@@ -997,7 +1217,13 @@ class CallOrchestrator(
                 }
             }
         }
-        val session = RtpSession(context, localPort, remoteAddr, remotePort, payloadType)
+        val session = RtpSession(
+            context, localPort, remoteAddr, remotePort, payloadType,
+            // A leg we answered ourselves opens the downlink before the
+            // network has anything to say on it: the silence at the start of
+            // that capture is the network being quiet, not a dead source.
+            allowSilentStart = gsmAutoAnswered
+        )
 
         // DTMF from the SIP side → the GSM call, so IVR menus work.  Accept
         // the payload type the server named in its SDP as well as our own 101.
@@ -1134,6 +1360,8 @@ class CallOrchestrator(
             activeGsmCall = null
             pendingIncoming = null
             pendingRtpAddr = null
+            earlyMediaSent = false
+            gsmAutoAnswered = false
         } finally {
             bridgeState = BridgeState.IDLE
             generation++
@@ -1263,6 +1491,8 @@ class CallOrchestrator(
         activeGsmCall = null
         pendingIncoming = null
         pendingRtpAddr = null
+        earlyMediaSent = false
+        gsmAutoAnswered = false
         diallerInitiated = false
         bridgeState = BridgeState.IDLE
         generation++

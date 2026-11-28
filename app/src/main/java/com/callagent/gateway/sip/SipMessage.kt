@@ -588,6 +588,48 @@ object SipBuilder {
     }
 
     /**
+     * 183 Session Progress carrying our own SDP — the early-media answer.
+     *
+     * The same shape as the 200 OK, but the dialog is not established: the
+     * media stream described in the SDP is real and carries sound, while the
+     * call itself is still not answered.  That is what lets the far end hear
+     * the cellular side before it picks the call up.
+     *
+     * The To tag has to be the one the 200 OK will use — the tag identifies
+     * the dialog, and a later answer with a different tag is a second,
+     * unrelated dialog as far as the peer is concerned.
+     *
+     * @param negotiatedPayloadType the payload the session actually uses, so
+     *   the early media and the final answer carry the same codec.
+     */
+    fun sessionProgress183(
+        msg: SipMessage,
+        username: String, localIp: String, localPort: Int,
+        localRtpPort: Int,
+        toTag: String = tag(),
+        srtp: SrtpKeys? = null,
+        srtpTag: Int = 1,
+        negotiatedPayloadType: Int? = null
+    ): String {
+        val to = msg.to ?: ""
+        val toWithTag = if (to.contains(";tag=")) to else "$to;tag=$toTag"
+        val negotiated = negotiatedPayloadType ?: msg.sdpNegotiatedPayloadType
+        val sdp = buildSdp(localIp, localRtpPort, srtp, srtpTag, negotiated)
+        return buildString {
+            append("SIP/2.0 183 Session Progress\r\n")
+            append("Via: ${msg.via}\r\n")
+            append("To: $toWithTag\r\n")
+            append("From: ${msg.from}\r\n")
+            append("Call-ID: ${msg.callId}\r\n")
+            append("CSeq: ${msg.cseq}\r\n")
+            append("Contact: <sip:$username@$localIp:$localPort$contactParam>\r\n")
+            append("Content-Type: application/sdp\r\n")
+            append("Content-Length: ${sdp.length}\r\n\r\n")
+            append(sdp)
+        }
+    }
+
+    /**
      * Turn an INVITE down.  Same shape as 180, with the code and reason the
      * caller chose, so the server is told why rather than being answered and
      * bridged to nothing.

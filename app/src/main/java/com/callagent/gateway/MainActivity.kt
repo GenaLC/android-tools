@@ -680,6 +680,21 @@ class MainActivity : AppCompatActivity() {
         // a device whose audio policy has no telephony TX route.
         findViewById<CheckBox>(R.id.cbCfgDigitalBridge).isChecked =
             prefs.getBoolean("digital_bridge", true)
+        // Early media and the early answer of the cellular leg.  The outbound
+        // auto-answer is on by default: the operator's announcement is only on
+        // the cellular downlink, and the downlink opens only once the leg is
+        // answered.  The inbound one is off: it would cost the caller their
+        // ringback.
+        findViewById<CheckBox>(R.id.cbCfgAutoAnswerOut).isChecked =
+            prefs.getBoolean("auto_answer_out", true)
+        findViewById<CheckBox>(R.id.cbCfgAutoAnswerIn).isChecked =
+            prefs.getBoolean("auto_answer_in", false)
+        findViewById<CheckBox>(R.id.cbCfgEarlyMedia).isChecked =
+            prefs.getBoolean("early_media", true)
+        findViewById<EditText>(R.id.etCfgAutoAnswerDelay).setText(
+            prefs.getInt("auto_answer_delay_ms",
+                com.callagent.gateway.bridge.AutoAnswerPolicy.DEFAULT_DELAY_MS).toString()
+        )
         val cbTls = findViewById<CheckBox>(R.id.cbCfgTls)
         val cbSrtp = findViewById<CheckBox>(R.id.cbCfgSrtp)
         cbTls.isChecked = prefs.getBoolean("sip_tls", false)
@@ -793,6 +808,13 @@ class MainActivity : AppCompatActivity() {
         val translit = findViewById<CheckBox>(R.id.cbCfgTranslit).isChecked
         val callMonitor = findViewById<CheckBox>(R.id.cbCfgCallMonitor).isChecked
         val digitalBridge = findViewById<CheckBox>(R.id.cbCfgDigitalBridge).isChecked
+        val autoAnswerOut = findViewById<CheckBox>(R.id.cbCfgAutoAnswerOut).isChecked
+        val autoAnswerIn = findViewById<CheckBox>(R.id.cbCfgAutoAnswerIn).isChecked
+        val earlyMedia = findViewById<CheckBox>(R.id.cbCfgEarlyMedia).isChecked
+        val autoAnswerDelay = com.callagent.gateway.bridge.AutoAnswerPolicy.delayMs(
+            findViewById<EditText>(R.id.etCfgAutoAnswerDelay).text.toString().trim().toIntOrNull()
+                ?: com.callagent.gateway.bridge.AutoAnswerPolicy.DEFAULT_DELAY_MS
+        )
         val tls = findViewById<CheckBox>(R.id.cbCfgTls).isChecked
         // Stored as asked for, but only ever acted on with TLS — so turning
         // TLS off and on again does not silently lose the audio setting.
@@ -824,6 +846,10 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("translit_ascii", translit)
             .putBoolean("call_monitor", callMonitor)
             .putBoolean("digital_bridge", digitalBridge)
+            .putBoolean("auto_answer_out", autoAnswerOut)
+            .putBoolean("auto_answer_in", autoAnswerIn)
+            .putBoolean("early_media", earlyMedia)
+            .putInt("auto_answer_delay_ms", autoAnswerDelay)
             .putBoolean("sip_tls", tls)
             .putBoolean("srtp_enabled", srtp)
             .putString("codec", codec)
@@ -837,6 +863,9 @@ class MainActivity : AppCompatActivity() {
                 "ascii=${if (translit) "on" else "off"}, " +
                 "monitor=${if (callMonitor) "on" else "off"}, " +
                 "digital bridge=${if (digitalBridge) "on" else "off"}, " +
+                "auto-answer out=${if (autoAnswerOut) "on" else "off"}, " +
+                "auto-answer in=${if (autoAnswerIn) "on" else "off"}, " +
+                "early media=${if (earlyMedia) "on" else "off"} (${autoAnswerDelay}ms), " +
                     "agent volume ${if (agentVolStep > 0) "+$agentVolStep" else "$agentVolStep"})"
         )
         Toast.makeText(this, "Saved — reconnecting", Toast.LENGTH_SHORT).show()

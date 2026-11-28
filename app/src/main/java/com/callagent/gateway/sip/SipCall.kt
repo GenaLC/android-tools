@@ -143,6 +143,18 @@ class SipCall(
     // GSM forward target (for outbound from server)
     var gsmForwardNumber: String? = null
 
+    /**
+     * True once a provisional response has carried SDP: the peer is sending
+     * media before the call is answered.
+     *
+     * Early media matters because the cellular side can have sound of its own
+     * at that point — the operator's announcement, played before anybody
+     * picks up — and that sound has to reach the far end while the call is
+     * still ringing there.
+     */
+    @Volatile var earlyMediaReceived: Boolean = false
+        private set
+
     // Original INVITE (for building responses)
     var originalInvite: SipMessage? = null
 
@@ -154,6 +166,13 @@ class SipCall(
         fun onRtpReady(call: SipCall, remoteRtpAddr: String, remoteRtpPort: Int, payloadType: Int)
         /** A key press that arrived as SIP INFO rather than RTP. */
         fun onDtmf(call: SipCall, digit: Char, durationMs: Int) {}
+        /**
+         * The peer offered media in a provisional response (183/180 with SDP).
+         *
+         * The stream is live from this moment on, so the cellular side can be
+         * sent to it right away — before the call itself is answered.
+         */
+        fun onEarlyMedia(call: SipCall, remoteRtpAddr: String, remoteRtpPort: Int, payloadType: Int) {}
     }
 
     /** Process incoming SIP message for this dialog */
@@ -173,7 +192,16 @@ class SipCall(
                 // Only a payload the peer offered may be sent; the configured
                 // fallback covers a peer that offered no codec this build
                 // speaks, and the answer is built from the same value.
-                negotiatedPayloadType = msg.sdpPreferredPayloadType ?: SipBuilder.defaultPayloadType()
+                //
+                // The answer's SDP is what decides — but only when it has one.
+                // An answer without SDP must not undo a codec the early media
+                // has already agreed on: the media stream is running with it.
+                val answerPayload = if (msg.body.contains("m=audio")) {
+                    msg.sdpPreferredPayloadType
+                } else null
+                negotiatedPayloadType = answerPayload
+                    ?: if (earlyMediaReceived) negotiatedPayloadType
+                    else SipBuilder.defaultPayloadType()
                 msg.sdpTelephoneEventPt?.let { telephoneEventPt = it }
 
                 // We offered SRTP; this is where we find out whether they took
@@ -181,7 +209,11 @@ class SipCall(
                 // does not try to protect a stream the far end will read as
                 // plain RTP -- but it is a downgrade, so it is said out loud
                 // rather than logged at debug and forgotten.
-                if (localSrtpKeys != null) {
+                //
+                // Keys already taken from the early media are kept: the media
+                // has been running with them since the 183, and dropping them
+                // now would leave the two ends protecting different streams.
+                if (localSrtpKeys != null && remoteSrtpKeys == null) {
                     if (absorbRemoteSrtp(msg)) {
                         Log.i(TAG, "SRTP negotiated: ${remoteSrtpKeys?.suite?.sdpName}")
                         sipClient.logListener?.invoke("SRTP active (${remoteSrtpKeys?.suite?.sdpName})")
@@ -227,6 +259,9 @@ class SipCall(
             msg.isResponse && msg.statusCode == 180 -> {
                 state = State.RINGING
                 remoteTag = msg.toTag
+                // A 180 may carry SDP as well — rare, but legal, and it means
+                // the same thing it means in a 183: the media stream is live.
+                handleEarlyMedia(msg)
                 return true
             }
 
@@ -283,6 +318,9 @@ class SipCall(
                 state = State.RINGING
                 remoteTag = msg.toTag
                 Log.i(TAG, "183 Session Progress for call $callId")
+                // The SDP in a 183 is the early media: the peer is already
+                // sending sound, and the answer to it is to start sending back.
+                handleEarlyMedia(msg)
                 return true
             }
 
@@ -377,6 +415,40 @@ class SipCall(
     }
 
     /**
+     * A provisional response can carry SDP, and that SDP describes a media
+     * stream that is already live: the peer is sending sound while the call
+     * is still ringing.
+     *
+     * Everything the session needs is taken from it — the address to send to,
+     * the codec, the DTMF payload and, when the media is protected, the keys.
+     * The 200 OK may then arrive without any SDP of its own, and the values
+     * found here are the ones the call keeps.
+     */
+    private fun handleEarlyMedia(msg: SipMessage) {
+        val port = msg.sdpRtpPort
+        val addr = msg.sdpAddress
+        if (port == null || port <= 0 || addr.isNullOrEmpty()) return
+
+        // Protected media: the early media and the final answer are one
+        // stream, so they are protected with the same keys.
+        if (localSrtpKeys != null && remoteSrtpKeys == null) {
+            if (absorbRemoteSrtp(msg)) {
+                Log.i(TAG, "SRTP negotiated in the early media: ${remoteSrtpKeys?.suite?.sdpName}")
+            }
+        }
+
+        remoteRtpPort = port
+        remoteRtpAddress = addr
+        val pt = msg.sdpPreferredPayloadType ?: negotiatedPayloadType
+        negotiatedPayloadType = pt
+        msg.sdpTelephoneEventPt?.let { telephoneEventPt = it }
+
+        earlyMediaReceived = true
+        Log.i(TAG, "Early media for call $callId: $addr:$port pt=$pt codecs=${msg.sdpCodecs}")
+        listener?.onEarlyMedia(this, addr, port, pt)
+    }
+
+    /**
      * Answer an in-dialog offer (re-INVITE or UPDATE) with 200 OK.
      *
      * The media session is not renegotiated: the answer repeats our existing
@@ -445,6 +517,45 @@ class SipCall(
 
         state = State.ANSWERED
         Log.i(TAG, "Sent 200 OK for inbound call $callId (RTP port: $localRtpPort)")
+    }
+
+    /**
+     * Answer with early media: 183 Session Progress carrying our own SDP.
+     *
+     * The dialog is not established — the call is still ringing at the far
+     * end — but the media stream named in the SDP is real, and what goes into
+     * it can already be the cellular side.  That is how the operator's
+     * announcement, played before anybody picks the phone up, reaches the
+     * agent while their phone is still ringing.
+     *
+     * The To tag is the one [accept] uses, so the 200 OK that ends the call
+     * belongs to this dialog.
+     */
+    fun answerEarly(localRtpPort: Int): Boolean {
+        if (state == State.TERMINATED || state == State.ANSWERED) return false
+        // Only the gateway's own incoming call can be answered this way: as
+        // the caller of a dialog we would have nothing to send a 183 into.
+        val invite = originalInvite ?: return false
+
+        this.localRtpPort = localRtpPort
+        val toTag = localTag
+        toHeader = invite.to?.let { to ->
+            if (to.contains(";tag=")) to else "$to;tag=$toTag"
+        }
+
+        val progress = SipBuilder.sessionProgress183(
+            invite, sipClient.username, sipClient.publicIp, sipClient.localPort,
+            localRtpPort = localRtpPort,
+            toTag = toTag,
+            srtp = if (srtpActive) localSrtpKeys else null,
+            srtpTag = srtpTag,
+            negotiatedPayloadType = negotiatedPayloadType
+        )
+        sipClient.sendResponse(progress, responseTarget())
+
+        state = State.RINGING
+        Log.i(TAG, "Sent 183 Session Progress with SDP for call $callId (RTP port: $localRtpPort)")
+        return true
     }
 
     /** Turn down an inbound INVITE we cannot bridge. */
