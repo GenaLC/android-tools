@@ -391,6 +391,81 @@
                         </LinearLayout>
                     </LinearLayout>
 
+                    <!-- USSD request -->
+                    <!--
+                        A question for the operator, asked of the SIM
+                        directly: the balance of the account, the minutes
+                        left, the number the SIM is reachable at.  It needs
+                        the modem and nothing else, so it works whether the
+                        SIP side is registered or not.
+                    -->
+                    <LinearLayout
+                        android:id="@+id/homeUssdCard"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="@drawable/card_bg"
+                        android:padding="16dp"
+                        android:layout_marginTop="16dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="USSD REQUEST"
+                            android:textSize="12sp"
+                            android:textStyle="bold"
+                            android:textColor="@color/text_secondary" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Sent straight to the SIM. A code starts with * or # — *100# for the balance, say."
+                            android:textSize="11sp"
+                            android:textColor="@color/text_secondary"
+                            android:paddingTop="4dp"
+                            android:paddingBottom="2dp" />
+
+                        <EditText
+                            android:id="@+id/etUssdCode"
+                            style="@style/CfgField"
+                            android:hint="*100#"
+                            android:inputType="textNoSuggestions"
+                            android:imeOptions="actionSend"
+                            android:maxLines="1" />
+
+                        <Spinner
+                            android:id="@+id/spUssdSim"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:padding="10dp"
+                            android:background="@drawable/input_bg"
+                            android:spinnerMode="dropdown" />
+
+                        <Button
+                            android:id="@+id/btnUssdSend"
+                            android:layout_width="match_parent"
+                            android:layout_height="46dp"
+                            android:layout_marginTop="8dp"
+                            android:text="Send request"
+                            android:textSize="13sp"
+                            android:textColor="#FFFFFF"
+                            android:backgroundTint="@color/primary"
+                            android:minHeight="0dp"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <TextView
+                            android:id="@+id/tvUssdResponse"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textSize="13sp"
+                            android:textColor="@color/text_primary"
+                            android:fontFamily="monospace"
+                            android:paddingTop="12dp" />
+                    </LinearLayout>
+
                     <!-- Recent calls -->
                     <LinearLayout
                         android:layout_width="match_parent"

@@ -47,11 +47,13 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.PopupMenu
 import android.widget.Toast
+import android.widget.ArrayAdapter
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,6 +66,7 @@ import com.callagent.gateway.sip.SipTrust
 import com.callagent.gateway.sip.SipTrustProvider
 import com.callagent.gateway.sms.SmsOutbox
 import com.callagent.gateway.service.GatewayService
+import com.callagent.gateway.ussd.UssdRequest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -125,6 +128,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnFilterIncoming: Button
     private lateinit var btnFilterOutgoing: Button
     private lateinit var btnFilterSms: Button
+
+    // ── USSD ─────────────────────────────────────────────
+    private lateinit var etUssdCode: EditText
+    private lateinit var spUssdSim: Spinner
+    private lateinit var btnUssdSend: Button
+    private lateinit var tvUssdResponse: TextView
+
+    /** The SIMs in the picker, in the order it shows them.  -1 is the SIM the
+     *  platform places calls with — the one the gateway itself calls from. */
+    private val ussdSims = mutableListOf(-1)
     /** "all" | "in" | "out" | "sms" — which entries the home list shows.  A missed call
      *  is an inbound one that never carried audio, so it belongs under
      *  Incoming rather than in a category of its own. */
@@ -322,6 +335,16 @@ class MainActivity : AppCompatActivity() {
                     val msg = intent.getStringExtra("msg") ?: return
                     appendLog(msg)
                 }
+                GatewayService.USSD_RESULT_ACTION -> {
+                    val code = intent.getStringExtra("ussd_code") ?: return
+                    val response = intent.getStringExtra("ussd_response") ?: ""
+                    val error = intent.getStringExtra("ussd_error") ?: ""
+                    tvUssdResponse.text = when {
+                        error.isNotEmpty() -> "$code — $error"
+                        response.isNotEmpty() -> "$code → $response"
+                        else -> "$code — no answer"
+                    }
+                }
             }
         }
     }
@@ -393,6 +416,12 @@ class MainActivity : AppCompatActivity() {
         btnHomeSnoop.setOnClickListener { toggleMonitor() }
         btnHomeEnd.setOnClickListener { endCallFromInCallScreen() }
 
+        // USSD console
+        etUssdCode = findViewById(R.id.etUssdCode)
+        spUssdSim = findViewById(R.id.spUssdSim)
+        btnUssdSend = findViewById(R.id.btnUssdSend)
+        tvUssdResponse = findViewById(R.id.tvUssdResponse)
+        btnUssdSend.setOnClickListener { sendUssdFromUi() }
 
         // Named and versioned at the top of settings.  It is the first thing
         // asked for when a change appears not to have taken, and this deploy
@@ -564,6 +593,67 @@ class MainActivity : AppCompatActivity() {
             row.findViewById<TextView>(R.id.tvSimCaption).text = sim.caption
             container.addView(row)
             ownNumberFields += sim.slot to et
+        }
+    }
+
+    // ── USSD ─────────────────────────────────────────────
+
+    /**
+     * The SIMs a code can go out from.
+     *
+     * The first entry is the SIM the platform places calls with — the one the
+     * gateway itself calls from, and so the one a balance question belongs
+     * to.  The others are there for a second card, which a gateway on two
+     * operators has.
+     *
+     * Built on every resume, because the SIMs are only readable once the
+     * phone-state permission has been granted, and that permission is asked
+     * for at the first launch.
+     */
+    private fun buildUssdSimPicker() {
+        val sims = activeSims()
+        val previous = ussdSims.getOrNull(spUssdSim.selectedItemPosition) ?: -1
+
+        ussdSims.clear()
+        ussdSims.add(-1)
+        val labels = mutableListOf("Default SIM — the one calls go out from")
+        for (sim in sims) {
+            ussdSims.add(sim.subId)
+            labels.add(sim.caption)
+        }
+        spUssdSim.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_item, labels
+        ).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        // Keep the SIM that was picked if it is still there; the list is
+        // rebuilt on every resume, and a picker that forgets its choice
+        // sends the next code to a different card.
+        val keep = ussdSims.indexOf(previous)
+        spUssdSim.setSelection(if (keep >= 0) keep else 0)
+    }
+
+    /**
+     * Send the code that was typed.
+     *
+     * The code is judged here so a typo is refused at once, and the service
+     * judges it again — the service is what talks to the modem, and it may be
+     * asked from somewhere else.
+     */
+    private fun sendUssdFromUi() {
+        val raw = etUssdCode.text?.toString().orEmpty()
+        when (val prepared = UssdRequest.prepare(raw)) {
+            is UssdRequest.Prepared.Refused -> {
+                val why = prepared.reason.describe()
+                tvUssdResponse.text = why
+                appendLog("USSD refused: $why")
+            }
+            is UssdRequest.Prepared.Ready -> {
+                val subId = ussdSims.getOrElse(spUssdSim.selectedItemPosition) { -1 }
+                tvUssdResponse.text = "Sending ${prepared.code}…"
+                appendLog("USSD: sending ${prepared.code}")
+                GatewayService.requestUssd(this, prepared.code, subId)
+            }
         }
     }
 
@@ -1604,6 +1694,7 @@ class MainActivity : AppCompatActivity() {
         val filter = IntentFilter().apply {
             addAction(GatewayService.STATUS_ACTION)
             addAction(GatewayService.LOG_ACTION)
+            addAction(GatewayService.USSD_RESULT_ACTION)
         }
         // NOT_EXPORTED: the service sends these with setPackage(), so nothing
         // outside the app has any business delivering them — exported, any
@@ -1662,6 +1753,11 @@ class MainActivity : AppCompatActivity() {
         // Re-apply the chip highlight: the visual state is set in code, so it
         // has to be restored whenever the view comes back.
         if (::btnFilterAll.isInitialized) setCallFilter(callFilter)
+
+        // The SIMs are only readable once the phone-state permission has been
+        // granted, and that permission is asked for at the first launch — so
+        // the picker is rebuilt here rather than once, at startup.
+        buildUssdSimPicker()
 
         netHandler.removeCallbacks(netRunnable)
         netRunnable.run()

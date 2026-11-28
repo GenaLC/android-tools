@@ -6,6 +6,7 @@ import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.telecom.Call
@@ -19,6 +20,7 @@ import android.telephony.TelephonyManager
 import android.util.Log
 import com.callagent.gateway.DeviceProfile
 import com.callagent.gateway.RootShell
+import com.callagent.gateway.ussd.UssdFailure
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -401,32 +403,16 @@ object GsmCallManager {
         // is a NoSuchMethodError -- an Error, which the catch below does not
         // catch -- so there the Telecom path handles the code instead.
         if (code.endsWith("#") && android.os.Build.VERSION.SDK_INT >= 26) {
-            try {
-                val telephony =
-                    context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-                telephony.sendUssdRequest(
-                    code,
-                    object : TelephonyManager.UssdResponseCallback() {
-                        override fun onReceiveUssdResponse(
-                            tm: TelephonyManager, request: String, response: CharSequence
-                        ) {
-                            Log.i(TAG, "USSD $request → $response")
-                            onResult(response.toString())
-                        }
-
-                        override fun onReceiveUssdResponseFailed(
-                            tm: TelephonyManager, request: String, failureCode: Int
-                        ) {
-                            Log.w(TAG, "USSD $request failed (code $failureCode)")
-                            onResult("USSD $request failed (code $failureCode)")
-                        }
-                    },
-                    Handler(Looper.getMainLooper())
+            var answered = false
+            val sent = sendUssd(context, code, -1) { response, failure ->
+                answered = true
+                onResult(
+                    if (failure == null) response.orEmpty()
+                    else "USSD $code failed: ${failure.describe()}"
                 )
-                return
-            } catch (e: Exception) {
-                Log.w(TAG, "sendUssdRequest failed (${e.message}) — falling back to Telecom")
             }
+            if (sent || answered) return
+            // The request could not be made at all — fall through to Telecom.
         }
         try {
             val telecom = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
@@ -434,6 +420,79 @@ object GsmCallManager {
             onResult(if (handled) "MMI $code sent" else "MMI $code not recognised")
         } catch (e: Exception) {
             onResult("MMI $code failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Send a USSD code to the network and report what came back.
+     *
+     * The code goes to the SIM through the platform's own USSD channel: it
+     * needs the modem and nothing else, so it works whether the SIP side is
+     * registered or not.
+     *
+     * [onResult] is called exactly once — with the text the network sent, or
+     * with the reason there was none.  The answer arrives on the main looper.
+     *
+     * The SIM the code goes out from is named by its subscription; below
+     * Android 12 that cannot be done through the SDK this app is built
+     * against, and the default SIM is used instead.
+     */
+    @SuppressLint("MissingPermission")
+    fun sendUssd(
+        context: Context,
+        code: String,
+        subscriptionId: Int,
+        onResult: (response: String?, failure: UssdFailure?) -> Unit
+    ): Boolean {
+        val telephony = try {
+            val base = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            // createForSubscriptionId is API 31; the static it replaced is gone
+            // from the SDK this app compiles against.
+            if (subscriptionId >= 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                base.createForSubscriptionId(subscriptionId)
+            } else {
+                base
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not reach the telephony service: ${e.message}")
+            onResult(null, UssdFailure.NOT_SENT)
+            return false
+        }
+        return try {
+            telephony.sendUssdRequest(
+                code,
+                object : TelephonyManager.UssdResponseCallback() {
+                    override fun onReceiveUssdResponse(
+                        tm: TelephonyManager?, request: String?, response: CharSequence?
+                    ) {
+                        onResult(response?.toString() ?: "", null)
+                    }
+
+                    override fun onReceiveUssdResponseFailed(
+                        tm: TelephonyManager?, request: String?, failureCode: Int
+                    ) {
+                        Log.w(TAG, "USSD $request failed (code $failureCode)")
+                        onResult(null, UssdFailure.fromCode(failureCode))
+                    }
+                },
+                Handler(Looper.getMainLooper())
+            )
+            true
+        } catch (e: SecurityException) {
+            // CALL_PHONE is what the platform asks for; without it the request
+            // is refused before it reaches the modem.
+            Log.w(TAG, "USSD $code refused: ${e.message}")
+            onResult(null, UssdFailure.NOT_PERMITTED)
+            false
+        } catch (e: UnsupportedOperationException) {
+            // A device with no radio access: a tablet, a phone without a modem.
+            Log.w(TAG, "USSD $code refused: ${e.message}")
+            onResult(null, UssdFailure.NOT_SENT)
+            false
+        } catch (e: Exception) {
+            Log.w(TAG, "USSD $code failed: ${e.message}")
+            onResult(null, UssdFailure.NOT_SENT)
+            false
         }
     }
 

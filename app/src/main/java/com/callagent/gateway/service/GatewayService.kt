@@ -34,6 +34,7 @@ import com.callagent.gateway.bridge.CallOrchestrator
 import com.callagent.gateway.gsm.GsmCallManager
 import com.callagent.gateway.net.StunClient
 import com.callagent.gateway.sip.SipClient
+import com.callagent.gateway.ussd.UssdRequest
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.UUID
@@ -457,6 +458,16 @@ class GatewayService : Service() {
                 flushSmsQueue("received")
             }
             ACTION_DIAL -> dialFromDialler(intent)
+            ACTION_USSD_SEND -> {
+                // Started with startForegroundService() from the UI, so the
+                // foreground promise has to be honoured — with the
+                // notification it already has, not a new one.
+                startForeground(activeNotificationId(), buildNotification(notifState))
+                sendUssd(
+                    intent.getStringExtra(EXTRA_USSD_CODE).orEmpty(),
+                    intent.getIntExtra(EXTRA_USSD_SUBSCRIPTION, -1)
+                )
+            }
             ACTION_MUTE_AGENT -> {
                 agentMuted = if (intent.hasExtra(EXTRA_MUTE_ON)) {
                     intent.getBooleanExtra(EXTRA_MUTE_ON, false)
@@ -1052,6 +1063,48 @@ class GatewayService : Service() {
         val number = intent?.getStringExtra(EXTRA_NUMBER) ?: return
         orchestrator?.initiateDiallerCall(number)
             ?: broadcastLog("ERROR: Gateway not running — cannot bridge to SIP")
+    }
+
+    // ── USSD ─────────────────────────────────────────────
+
+    /**
+     * Send a USSD code to the network and tell the UI what came back.
+     *
+     * The code goes to the SIM through the platform's own USSD channel, so it
+     * needs the modem and nothing else — the gateway may be offline and the
+     * code still works.  The SIP side is not involved: a USSD request is a
+     * question for the operator, not a call to place.
+     */
+    private fun sendUssd(rawCode: String, subscriptionId: Int) {
+        val prepared = UssdRequest.prepare(rawCode)
+        if (prepared is UssdRequest.Prepared.Refused) {
+            val why = prepared.reason.describe()
+            broadcastLog("USSD refused: $why")
+            broadcastUssdResult(rawCode.trim(), "", why)
+            return
+        }
+        val code = (prepared as UssdRequest.Prepared.Ready).code
+
+        GsmCallManager.sendUssd(this, code, subscriptionId) { response, failure ->
+            if (failure == null) {
+                broadcastLog("USSD $code → $response")
+                broadcastUssdResult(code, response ?: "", "")
+            } else {
+                broadcastLog("USSD $code failed: ${failure.describe()}")
+                broadcastUssdResult(code, "", failure.describe())
+            }
+        }
+    }
+
+    /** Tell the UI what came back from a USSD request. */
+    private fun broadcastUssdResult(code: String, response: String, error: String) {
+        val intent = Intent(USSD_RESULT_ACTION).apply {
+            setPackage(packageName)
+            putExtra("ussd_code", code)
+            putExtra("ussd_response", response)
+            putExtra("ussd_error", error)
+        }
+        sendBroadcast(intent)
     }
 
     /**
@@ -1886,6 +1939,16 @@ class GatewayService : Service() {
         const val ACTION_SMS_REPORT = "com.callagent.gateway.SMS_REPORT"
         const val EXTRA_SMS_ID = "sms_id"
 
+        /** Send a USSD code to the SIM. */
+        const val ACTION_USSD_SEND = "com.callagent.gateway.USSD_SEND"
+        const val EXTRA_USSD_CODE = "ussd_request"
+
+        /** Which SIM to ask; -1 for the one the platform calls from. */
+        const val EXTRA_USSD_SUBSCRIPTION = "ussd_subscription"
+
+        /** What came back from a USSD request. */
+        const val USSD_RESULT_ACTION = "com.callagent.gateway.USSD_RESULT"
+
         /** How long to wait before retrying a message the server did not take. */
         private const val SMS_RETRY_MS = 30_000L
 
@@ -1944,6 +2007,22 @@ class GatewayService : Service() {
                 action = ACTION_STOP
             }
             context.startService(intent)
+        }
+
+        /**
+         * Ask the gateway to send a USSD code to the SIM.
+         *
+         * The service owns it rather than the activity: the answer comes back
+         * as a broadcast, so it survives the activity being closed, and it
+         * lands in the same log as everything else the gateway does.
+         */
+        fun requestUssd(context: Context, code: String, subscriptionId: Int) {
+            val intent = Intent(context, GatewayService::class.java).apply {
+                action = ACTION_USSD_SEND
+                putExtra(EXTRA_USSD_CODE, code)
+                putExtra(EXTRA_USSD_SUBSCRIPTION, subscriptionId)
+            }
+            startServiceCompat(context, intent)
         }
 
         /**
